@@ -3,13 +3,15 @@ Engrams components follow by implementation by DeepSeek
 
 Uses the Engrams Architecture with MHA and MoE
 
-mHC to be added in a later version.
+Pre-norm residual units (to be replaced by mHC in later version)
 
 """
+
 from typing import List
 from dataclasses import dataclass, field
 import math
 import argparse
+
 from sympy import isprime
 import numpy as np
 import torch
@@ -285,6 +287,19 @@ class NgramHashMapping:
         for layer_id in self.layer_ids:
             hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
         return hash_ids_for_all_layers
+    
+class LayerNorm(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        norm_x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm_x + self.shift
 
 class MultiHeadEmbedding(nn.Module):
     def __init__(self, list_of_N: List[int], D: int):
@@ -367,51 +382,168 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
 
     def forward(self, x, use_cache=False):
+        # TODO: Implement
         return x
 
 class MoEFeedForward(nn.Module):
-    def __init__(self):
-        super.__init__()
+    def __init__(self, cfg):
+        super().__init__()
+        self.num_experts_per_tok = cfg["num_experts_per_tok"]
+        self.num_experts = cfg["num_experts"]
+        self.emb_dim = cfg["emb_dim"]
 
-    def forward(self):
-        pass
+        self.gate = nn.Linear(cfg["emb_dim"], cfg["num_experts"], bias=False)
+        self.fc1 = nn.ModuleList(
+            [
+                nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+                for _ in range(self.num_experts)
+            ]
+        )
+        self.fc2 = nn.ModuleList(
+            [
+                nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+                for _ in range(self.num_experts)
+            ]
+        )
+        self.fc3 = nn.ModuleList(
+            [
+                nn.Linear(cfg["hidden_dim"], cfg["emb_dim"], bias=False)
+                for _ in range(self.num_experts)
+            ]
+        )
+
+    def forward(self, x):
+        """
+        Params
+            x: (batch, seq_len, emb_dim)
+        """
+
+        scores = self.gate(x)  # (b, seq_len, num_experts)
+        topk_scores, topk_indices = torch.topk(scores, self.num_experts_per_tok, dim=-1) # (b, seq_len, num_experts_per_tok)
+        topk_probs = torch.softmax(topk_scores, dim=-1)
+        
+        batch, seq_len, _ = x.shape
+        x_flat = x.reshape(batch * seq_len, self.emb_dim) 
+        out_flat = torch.zeros(batch * seq_len, self.emb_dim, device=x.device, dtype=x.dtype)
+
+        # Find all the different experts used on at least one token
+        topk_indices_flat = topk_indices.reshape(batch * seq_len, self.num_experts_per_tok)
+        topk_probs_flat = topk_probs.reshape(batch * seq_len, self.num_experts_per_tok)
+
+        used_experts = torch.unique(topk_indices_flat)
+
+        # Compute the output for each expert, masking the portion of the input to which it does not apply
+        for expert in used_experts:
+            expert_id = int(expert.item())
+
+            # Determine if a given token uses an expert
+            mask = topk_indices_flat == expert_id # (b*t, k)
+            if not mask.any():
+                continue
+            token_mask = mask.any(dim=-1) # (b*t)
+
+            # Get the indices of tokens using the expert
+            select_idx = token_mask.non_zero(as_tuple=False).squeeze(-1) # [b*t]
+
+            # Compute the forward pass for the tokens using the expert
+            expert_in = x_flat.index_select(0, select_idx)
+
+            expert_out = self.fc1[expert_id](expert_in) * self.fc2[expert_id](expert_in)
+            expert_out = torch.nn.SilU(expert_out) # SiLU used for MoE
+            expert_out = self.fc3[expert_id](expert_out)
+
+            # Determine probability assigned to each head
+            mask_selected = mask[select_idx]
+            slot_indices = mask_selected.int().argmax(dim=-1, keepdim=True)
+            selected_probs = torch.gather(
+                topk_probs_flat.index_select(0, select_idx), dim=-1, index=slot_indices
+            )
+
+            # Compute output as a weighted sum of outputs by probabilities
+            out_flat.index_add_(0, select_idx, expert_out * selected_probs.unsqueeze(-1))
+
+        return out_flat.reshape(batch, seq_len, self.emb_dim)
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
         self.attn = MultiHeadAttention(config)
-        self.moe  = lambda x:x
+        self.moe = MoEFeedForward(config)
+        self.norm1 = LayerNorm(config["emb_dim"])
+        self.norm2 = LayerNorm(config["emb_dim"])
+        self.norm3 = LayerNorm(config["emb_dim"])
         self.engram = None
-        if layer_id in engram_cfg.layer_ids:
+        if layer_id in config["layer_ids"]:
             self.engram = Engram(layer_id=layer_id)
     
-    def forward(self, input_ids, hidden_states, use_cache=False):
-        if self.engram is not None:
-            hidden_states = self.engram(hidden_states=hidden_states,input_ids=input_ids) + hidden_states
-        hidden_states = self.attn(hidden_states) + hidden_states
-        hidden_states = self.moe(hidden_states) + hidden_states
+    def forward(self, input_ids, x, use_cache=False):
 
-        return hidden_states
+        # Note that all residual units are pre-norm
+
+        if use_cache:
+            raise NotImplementedError
+
+        # (Engram Layer Only) Engram + Residual Connection
+        if self.engram is not None:
+            shortcut = x
+            x = self.norm1(x)
+            x = self.engram(hidden_states=x, input_ids=input_ids)
+            x = x + shortcut
+        
+        # Attention + Residual Connection
+        shortcut = x
+        x = self.norm2(x)
+        x = self.attn(x, use_cache) 
+        x = x + shortcut
+
+        # FFN + Residual Connection
+        shortcut = x
+        x = self.norm3(x)
+        x = self.moe(x)
+        x = x + shortcut
+
+        return x
     
 
 class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
+        self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
+        self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
+        self.drop_emb = nn.Dropout(config["drop_rate"])
+
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(config, layer_id=id) for id in range(config["n_layers"])]
         )
+        self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
 
     
     def forward(self, input_ids, use_cache=False):
 
-        hidden_states = self.embed(input_ids)
+        # Figure out positional embeddings based on shift
+        _, seq_len = input_ids.shape
+        if use_cache:
+            raise NotImplementedError
+        else:
+            pos_ids = torch.arange(start=0, end=seq_len, device=input_ids.device, dtype=torch.long)
+
+        token_embeds = self.token_embed(input_ids)
+        pos_embeds = self.pos_embed(pos_ids)
+        x = token_embeds + pos_embeds
+        x = self.drop_emb(x)
         
         for block in self.transformer_blocks:
-            hidden_states = block(input_ids=input_ids, hidden_states=hidden_states, use_cache=use_cache)
+            x = block(input_ids=input_ids, x=x, use_cache=use_cache)
+
+        x = self.final_norm(x)
+        logits = self.out_head(x)
+
+        return logits
+
+        
 
 def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache=True):
     """
@@ -423,9 +555,9 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
         use_cache (bool)
     """
 
-    model.eval()
-
     # TODO: look into CUDA synchronization
+
+    model.eval()
 
     context_len = context_size or 256
     batch_size, base_len = input_ids.shape
@@ -447,6 +579,8 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
                 next_idx = logits[:, -1].argmax(dim=-1)
                 out[:, current_len] = next_idx
                 current_len += 1
+
+    return out
 
 
 
@@ -470,7 +604,7 @@ def main():
     )
     args = parser.parse_args()
 
-    text = "Only Alexander the Great could tame the horse Bucephalus."
+    text = "Hello, I am"
 
     tokenizer = AutoTokenizer.from_pretrained(
         engram_cfg.tokenizer_name_or_path,
@@ -479,17 +613,20 @@ def main():
 
     input_ids = tokenizer(text,return_tensors='pt').input_ids
 
+    print(f"input_ids: {input_ids.shape}")
+
     config = {
-        "vocab_size": 50257,            # Vocabulary size
-        "context_length": args.max_new_tokens + len(input_ids),
-        "emb_dim": args.emb_dim,        # Embedding dimension
-        "hidden_dim": args.hidden_dim,  # Intermediate size
-        "n_heads": args.n_heads,        # Number of attention heads
-        "n_layers": args.n_layers,      # Number of layers
-        "drop_rate": 0.0,               # Dropout rate
-        "qkv_bias": False,              # Query-Key-Value bias
+        "vocab_size": backbone_config.vocab_size,               # Vocabulary size (prev 50257)
+        "context_length": args.max_new_tokens + len(input_ids), # Context length
+        "emb_dim": args.emb_dim,                                # Embedding dimension
+        "hidden_dim": args.hidden_dim,                          # Intermediate size
+        "n_heads": args.n_heads,                                # Number of attention heads
+        "n_layers": args.n_layers,                              # Number of layers
+        "drop_rate": 0.0,                                       # Dropout rate
+        "qkv_bias": False,                                      # Query-Key-Value bias
         "num_experts": args.num_experts,
         "num_experts_per_tok": args.num_experts_per_tok if args.num_experts > 0 else 0,
+        "layer_ids": []                                         # A list of which layers have engram block
     }
 
     model = EngramsModel(config)
