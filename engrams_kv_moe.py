@@ -42,6 +42,12 @@ engram_cfg = EngramConfig()
 backbone_config = BackBoneConfig()
 
 class CompressedTokenizer:
+    """
+    Compressed tokenizer maps tokens with approx. semantically equivalent tokens to the same IDs
+    to reduce overall alphabet size.
+    (Conditional Memory via Scalable Lookup, Section 2.2)
+    """
+
     def __init__(
         self,
         tokenizer_name_or_path,
@@ -63,9 +69,13 @@ class CompressedTokenizer:
         self.lookup_table, self.num_new_token = self._build_lookup_table()
     
     def __len__(self):
+        """ Return the number of tokens in the compressed alphabet """
         return self.num_new_token
     
     def _build_lookup_table(self):
+        """ Construct surjective map of initial token IDs to new token IDs where tokens that agree 
+        up to normalization are mapped to the same IDs """
+
         old2new = {}
         key2new = {}          
         new_tokens = []
@@ -94,6 +104,8 @@ class CompressedTokenizer:
         return lookup, len(new_tokens)
     
     def _compress(self, input_ids):
+        """ Convert ids from initial alphabet to ids from compressed alphabet """
+        
         arr = np.asarray(input_ids, dtype=np.int64)
         pos_mask = arr >= 0
         out = arr.copy()
@@ -287,19 +299,6 @@ class NgramHashMapping:
         for layer_id in self.layer_ids:
             hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
         return hash_ids_for_all_layers
-    
-class LayerNorm(nn.Module):
-    def __init__(self, emb_dim):
-        super().__init__()
-        self.eps = 1e-5
-        self.scale = nn.Parameter(torch.ones(emb_dim))
-        self.shift = nn.Parameter(torch.zeros(emb_dim))
-
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.shift
 
 class MultiHeadEmbedding(nn.Module):
     def __init__(self, list_of_N: List[int], D: int):
@@ -354,7 +353,7 @@ class Engram(nn.Module):
         self.norm1 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
         self.norm2 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
     
-    def forward(self,hidden_states,input_ids):
+    def forward(self, hidden_states, input_ids):
         """
         hidden_states: [B, L, HC_MULT, D]
         input_ids: [B, L]
@@ -377,13 +376,94 @@ class Engram(nn.Module):
         return output 
     
 class MultiHeadAttention(nn.Module):
-    
     def __init__(self, config):
         super().__init__()
 
+        self.emb_dim = config["emb_dim"]
+        self.num_heads = config["n_heads"]
+        self.qkv_bias = config["qkv_bias"]
+
+        assert self.emb_dim % self.num_heads == 0, "d_out must be divisible by num_heads"
+
+        self.head_dim = self.emb_dim // self.num_heads  # Reduce the projection dim to match desired output dim
+
+        self.W_query = nn.Linear(self.emb_dim, self.emb_dim, bias=self.qkv_bias)
+        self.W_key = nn.Linear(self.emb_dim, self.emb_dim, bias=self.qkv_bias)
+        self.W_value = nn.Linear(self.emb_dim, self.emb_dim, bias=self.qkv_bias)
+        self.out_proj = nn.Linear(self.emb_dim, self.emb_dim)  # Linear layer to combine head outputs
+        self.dropout = nn.Dropout(config["drop_rate"])
+
+        self.register_buffer("cache_k", None, persistent=False)
+        self.register_buffer("cache_v", None, persistent=False)
+        self.ptr_current_pos = 0
+
     def forward(self, x, use_cache=False):
-        # TODO: Implement
-        return x
+        b, num_tokens, _ = x.shape
+
+        keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)
+        values_new = self.W_value(x)
+        queries = self.W_query(x)
+
+        # We implicitly split the matrix by adding a `num_heads` dimension
+        # Unroll last dim: (b, num_tokens, d_out) -> (b, num_tokens, num_heads, head_dim)
+        keys_new = keys_new.view(b, num_tokens, self.num_heads, self.head_dim)
+        values_new = values_new.view(b, num_tokens, self.num_heads, self.head_dim)
+        queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
+
+        if use_cache:
+            if self.cache_k is None:
+                self.cache_k, self.cache_v = keys_new, values_new
+            else:
+                self.cache_k = torch.cat([self.cache_k, keys_new], dim=1)
+                self.cache_v = torch.cat([self.cache_v, values_new], dim=1)
+            keys, values = self.cache_k, self.cache_v
+        else:
+            keys, values = keys_new, values_new
+
+        # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
+        keys = keys.transpose(1, 2)
+        queries = queries.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # Compute scaled dot-product attention (aka self-attention) with a causal mask
+        attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
+
+        # causal mask
+        num_tokens_Q = queries.shape[-2]
+        num_tokens_K = keys.shape[-2]
+        device = queries.device
+        if use_cache:
+            q_positions = torch.arange(
+                self.ptr_current_pos,
+                self.ptr_current_pos + num_tokens_Q,
+                device=device,
+                dtype=torch.long,
+            )
+            self.ptr_current_pos += num_tokens_Q
+        else:
+            q_positions = torch.arange(num_tokens_Q, device=device, dtype=torch.long)
+            self.ptr_current_pos = 0
+        k_positions = torch.arange(num_tokens_K, device=device, dtype=torch.long)
+        mask_bool = q_positions.unsqueeze(-1) < k_positions.unsqueeze(0)
+
+        # Use the mask to fill attention scores
+        attn_scores.masked_fill_(mask_bool, -torch.inf)
+
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Shape: (b, num_tokens, num_heads, head_dim)
+        context_vec = (attn_weights @ values).transpose(1, 2)
+
+        # Combine heads, where self.d_out = self.num_heads * self.head_dim
+        context_vec = context_vec.contiguous().view(b, num_tokens, self.emb_dim)
+        context_vec = self.out_proj(context_vec)  # optional projection
+
+        return context_vec
+
+    def reset_cache(self):
+        self.cache_k, self.cache_v = None, None
+        self.ptr_current_pos = 0
 
 class MoEFeedForward(nn.Module):
     def __init__(self, cfg):
@@ -464,6 +544,18 @@ class MoEFeedForward(nn.Module):
 
         return out_flat.reshape(batch, seq_len, self.emb_dim)
 
+class LayerNorm(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        norm_x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm_x + self.shift
 
 class TransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
@@ -505,7 +597,6 @@ class TransformerBlock(nn.Module):
 
         return x
     
-
 class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -543,8 +634,6 @@ class EngramsModel(nn.Module):
 
         return logits
 
-        
-
 def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache=True):
     """
     Params:
@@ -581,8 +670,6 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
                 current_len += 1
 
     return out
-
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -647,6 +734,7 @@ def main():
 
     print("✅ Forward Complete!")
     print(decoded_output)
+
 
 if __name__ == '__main__':
     main()
