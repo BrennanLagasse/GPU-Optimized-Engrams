@@ -45,7 +45,7 @@ class CompressedTokenizer:
     """
     Compressed tokenizer maps tokens with approx. semantically equivalent tokens to the same IDs
     to reduce overall alphabet size.
-    (Conditional Memory via Scalable Lookup, Section 2.2)
+    (Conditional Memory via Scalable Lookup, Section 2.2, Tokenizer Compression)
     """
 
     def __init__(
@@ -105,7 +105,7 @@ class CompressedTokenizer:
     
     def _compress(self, input_ids):
         """ Convert ids from initial alphabet to ids from compressed alphabet """
-        
+
         arr = np.asarray(input_ids, dtype=np.int64)
         pos_mask = arr >= 0
         out = arr.copy()
@@ -182,6 +182,16 @@ def find_next_prime(start, seen_primes):
         candidate += 1
 
 class NgramHashMapping:
+    """ 
+    NGramHashMapping maps tokens to latent embeddings using hash embeddings.
+
+    Hash embeddings are computed by creating k tables of embeddings and k hash functions
+    that map the input ids to corresponding embedded entries. Embeddings are computed as a weighted sum
+    across the k embeddings in the table.
+
+    (Hash Embeddings for Efficient Word Representations, Conditional Memory via Scalable Lookup)
+    """
+
     def __init__(
         self, 
         engram_vocab_size,
@@ -212,6 +222,7 @@ class NgramHashMapping:
         half_bound = max(1, M_max // 2)
         PRIME_1 = 10007
         
+        # Compute the random seeds for the hash functions for each layer
         self.layer_multipliers = {}
 
         for layer_id in self.layer_ids:
@@ -260,6 +271,14 @@ class NgramHashMapping:
         input_ids: np.ndarray,
         layer_id: int,
     ) -> np.ndarray:
+        """
+        Maps a list of input ids in a given alphabet to the hashes for the component n-grams.
+        Output is in the form (batch, num_tokens, max_ngram_size - 1). Each hash index corresponds
+        with a embedding table unique to each layer and head.
+
+        See Conditional Memory via Scalable Lookup, Section 2.2, Multi-Head Hashing
+        """
+
         x = np.asarray(input_ids, dtype=np.int64)
         B, T = x.shape
 
@@ -269,32 +288,46 @@ class NgramHashMapping:
             if k == 0: 
                 return x
             
+            # TODO: Review the choice of the constant non-zero padding value
             shifted = np.pad(x, ((0, 0), (k, 0)),
                                 mode='constant', constant_values=self.pad_id)[:, :T]
             return shifted
 
-        base_shifts = [shift_k(k) for k in range(self.max_ngram_size)]
+        base_shifts = [shift_k(k) for k in range(self.max_ngram_size)] # (k, b, t)
 
         all_hashes = []
         
+        # Seperately hash n-grams for all choices n
         for n in range(2, self.max_ngram_size + 1):
+
+            # Compute mix, a XOR sum of labels of all tokens in n-gram starting
+            # and each index multiplied by random weights
             n_gram_index = n - 2
             tokens = base_shifts[:n]
-            mix = (tokens[0] * multipliers[0])
+            mix = (tokens[0] * multipliers[0]) # (b, t)
             for k in range(1, n):
                 mix = np.bitwise_xor(mix, tokens[k] * multipliers[k])
+
+            # Determine number of heads for engram and size of vocab for each
             num_heads_for_this_ngram = self.n_head_per_ngram
             head_vocab_sizes = self.vocab_size_across_layers[layer_id][n_gram_index]
             
+            # For each head compute the hash by modding mix by size of head alphabet
             for j in range(num_heads_for_this_ngram):
                 mod = int(head_vocab_sizes[j])
                 head_hash = mix % mod
-                all_hashes.append(head_hash.astype(np.int64, copy=False))
+                all_hashes.append(head_hash.astype(np.int64, copy=False)) 
+                
+        # Note: all_hashes is (max_ngram_size - 1, b, t), so out is (b, t, max_ngram_size - 1)
         
         return np.stack(all_hashes, axis=2)
 
     def hash(self, input_ids):
+
+        # Re-encode input with compressed alphabet
         input_ids = self.compressed_tokenizer(input_ids)
+        
+        # Hash n-grams
         hash_ids_for_all_layers = {}
         for layer_id in self.layer_ids:
             hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)

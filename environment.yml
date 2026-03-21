@@ -1,0 +1,12 @@
+name: ai_infra_env_new
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - conda-forge::tiktoken
+  - ipykernel
+  - matplotlib
+  - conda-forge::transformers
+  - anaconda::pytest
+  - conda-forge::ruff
