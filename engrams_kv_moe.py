@@ -31,15 +31,7 @@ class EngramConfig:
     seed: int = 0
     kernel_size: int = 4
     
-@dataclass
-class BackBoneConfig:
-    hidden_size: int = 1024
-    hc_mult: int = 4
-    vocab_size: int = 129280
-    num_layers: int = 30
-    
 engram_cfg = EngramConfig()
-backbone_config = BackBoneConfig()
 
 class CompressedTokenizer:
     """
@@ -106,7 +98,7 @@ class CompressedTokenizer:
     def _compress(self, input_ids):
         """ Convert ids from initial alphabet to ids from compressed alphabet """
 
-        arr = np.asarray(input_ids, dtype=np.int64)
+        arr = np.asarray(input_ids.cpu(), dtype=np.int64)
         pos_mask = arr >= 0
         out = arr.copy()
         valid_ids = arr[pos_mask]
@@ -240,6 +232,8 @@ class NgramHashMapping:
         self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
 
     def calculate_vocab_size_across_layers(self):
+        """ Returns a dictionary indexed by layer id with entries of dim (m-1, h) """
+
         seen_primes = set()
         vocab_size_across_layers = {}
         
@@ -277,6 +271,11 @@ class NgramHashMapping:
         with a embedding table unique to each layer and head.
 
         See Conditional Memory via Scalable Lookup, Section 2.2, Multi-Head Hashing
+
+        Return
+            all_hashes (np.ndarray): (b, t, (m-1)*h), type=int
+
+        (Where m is max_engrams_size, h is num_heads_for_this_engram)
         """
 
         x = np.asarray(input_ids, dtype=np.int64)
@@ -318,11 +317,19 @@ class NgramHashMapping:
                 head_hash = mix % mod
                 all_hashes.append(head_hash.astype(np.int64, copy=False)) 
                 
-        # Note: all_hashes is (max_ngram_size - 1, b, t), so out is (b, t, max_ngram_size - 1)
+        # Note: all_hashes is ((m-1)*h, b, t), so out is (b, t, (m-1)*h)
         
         return np.stack(all_hashes, axis=2)
 
     def hash(self, input_ids):
+        """ 
+        Takes sequence of ids of input tokens and returns the hash for all layers/n-grams/heads
+
+        Return
+            hash_ids (dict): (layers, b, t, (m-1)*h), dtype=int64
+
+        (Where m is max_engrams_size, h is num_heads_for_this_engram)
+        """
 
         # Re-encode input with compressed alphabet
         input_ids = self.compressed_tokenizer(input_ids)
@@ -339,25 +346,47 @@ class MultiHeadEmbedding(nn.Module):
         self.num_heads = len(list_of_N)
         self.embedding_dim = D
         
+        # Compute the offset for each n-gram size, head combo when tables are all concatenated
         offsets = [0]
         for n in list_of_N[:-1]:
             offsets.append(offsets[-1] + n)
         
         self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long))
         
+        # Represent the embeddings associated with all n-gram sizes, heads in one table
         total_N = sum(list_of_N)
         self.embedding = nn.Embedding(num_embeddings=total_N, embedding_dim=D)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Map the hash for each n-gram to the learned embedding.
+
+        Params:
+            input_ids (tensor): (b, t, (m-1)*h), dtype=int - a list of hashes for n-grams
+
+        Return:
+            output (tensor): (b, t, (m-1)*h, d) - a list of corresponding embedding vectors
+
+        (Where b is batch size, t is the number of input tokens, m is max_engram_size, 
+        d is engrams_emb_dim)
+        """
+
+        # Compute indices of embeddings corresponding with each hash (given all tables are concatenated)
         shifted_input_ids = input_ids + self.offsets
+        
+        # Index the embedding table
         output = self.embedding(shifted_input_ids)
         
         return output
     
 class Engram(nn.Module):
-    def __init__(self, layer_id):
+    def __init__(self, config, layer_id):
         super().__init__()
+
         self.layer_id = layer_id
+        self.hidden_dim = config["hidden_dim"]
+        self.hc_mult = config["hc_mult"]
+
         self.hash_mapping = NgramHashMapping(
             engram_vocab_size=engram_cfg.engram_vocab_size,
             max_ngram_size = engram_cfg.max_ngram_size,
@@ -368,44 +397,70 @@ class Engram(nn.Module):
             pad_id = engram_cfg.pad_id,
             seed = engram_cfg.seed,
         )
+
         self.multi_head_embedding = MultiHeadEmbedding(
             list_of_N = [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
             D = engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
         )
+
         self.short_conv = ShortConv(
-            hidden_size = backbone_config.hidden_size,
+            hidden_size = self.hidden_dim,
             kernel_size = engram_cfg.kernel_size,
             dilation    = engram_cfg.max_ngram_size,
-            hc_mult     = backbone_config.hc_mult,
+            hc_mult     = self.hc_mult,
         )
+
         engram_hidden_size = (engram_cfg.max_ngram_size-1) * engram_cfg.n_embed_per_ngram
-        self.value_proj = nn.Linear(engram_hidden_size,backbone_config.hidden_size)
+        self.value_proj = nn.Linear(engram_hidden_size, self.hidden_dim)
         self.key_projs = nn.ModuleList(
-            [nn.Linear(engram_hidden_size,backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)]
+            [nn.Linear(engram_hidden_size, self.hidden_dim) for _ in range(self.hc_mult)]
         )
-        self.norm1 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
-        self.norm2 = nn.ModuleList([nn.RMSNorm(backbone_config.hidden_size) for _ in range(backbone_config.hc_mult)])
+
+        self.norm1 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
+        self.norm2 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
     
     def forward(self, hidden_states, input_ids):
         """
         hidden_states: [B, L, HC_MULT, D]
         input_ids: [B, L]
         """
-        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id])
-        embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
+
+        # TODO: Currently hidden states is [B, L, D] form, this will cause some dimension issues
+        if len(hidden_states.shape) == 4:
+            pass
+        elif len(hidden_states.shape) == 3:
+            print("Kludge: adding extra dimensions since mHC not used")
+            raise ValueError
+        else:
+            raise ValueError
+
+
+        device = hidden_states.device
+
+        # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
+        # TODO: There is some recomputation here, seems quite inefficient
+        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id]).to(device)
+
+        # Retrieve embeddings corresponding with hashes (b, t, (m-1)*h, d)
+        embeddings = self.multi_head_embedding(hash_input_ids)
+        
+        # Concatenate all embeddings for n-grams starting at each token (b, t, (m-1)*h*d)
+        embeddings = embeddings.flatten(start_dim=-2)
+
         gates = []
-        for hc_idx in range(backbone_config.hc_mult):
+        for hc_idx in range(self.hc_mult):
             key = self.key_projs[hc_idx](embeddings)
             normed_key = self.norm1[hc_idx](key)
             query = hidden_states[:,:,hc_idx,:]
             normed_query = self.norm2[hc_idx](query)
-            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(backbone_config.hidden_size)
+            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(self.hidden_dim)
             gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
             gate = gate.sigmoid().unsqueeze(-1)
             gates.append(gate)
         gates = torch.stack(gates,dim=2)
         value = gates * self.value_proj(embeddings).unsqueeze(2)
         output = value + self.short_conv(value)
+
         return output 
     
 class MultiHeadAttention(nn.Module):
@@ -600,7 +655,7 @@ class TransformerBlock(nn.Module):
         self.norm3 = LayerNorm(config["emb_dim"])
         self.engram = None
         if layer_id in config["layer_ids"]:
-            self.engram = Engram(layer_id=layer_id)
+            self.engram = Engram(config=config, layer_id=layer_id)
     
     def forward(self, input_ids, x, use_cache=False):
 
@@ -643,6 +698,8 @@ class EngramsModel(nn.Module):
         )
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
+
+        assert config["hc_mult"] == 1, "Hyper-Connections not yet supported"
 
     
     def forward(self, input_ids, use_cache=False):
@@ -736,7 +793,7 @@ def main():
     print(f"input_ids: {input_ids.shape}")
 
     config = {
-        "vocab_size": backbone_config.vocab_size,               # Vocabulary size (prev 50257)
+        "vocab_size": 129280,                                   # Vocabulary size (prev 50257)
         "context_length": args.max_new_tokens + len(input_ids), # Context length
         "emb_dim": args.emb_dim,                                # Embedding dimension
         "hidden_dim": args.hidden_dim,                          # Intermediate size
@@ -746,7 +803,9 @@ def main():
         "qkv_bias": False,                                      # Query-Key-Value bias
         "num_experts": args.num_experts,
         "num_experts_per_tok": args.num_experts_per_tok if args.num_experts > 0 else 0,
-        "layer_ids": []                                         # A list of which layers have engram block
+        "hc_mult": 1,                                           # Branching factor for HC (> 1 when HC is used)
+        "layer_ids": [1],                                       # A list of which layers have engram block
+        "engrams_cfg": engram_cfg
     }
 
     model = EngramsModel(config)
