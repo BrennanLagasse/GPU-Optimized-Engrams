@@ -1,6 +1,15 @@
 import torch
 from transformers import AutoTokenizer
-from engrams_kv_moe import CompressedTokenizer, EngramsModel, engram_cfg, generate_text
+from engrams_naive import NaiveEngramsModel, generate_text_naive
+from engrams_kv_moe import (
+    CompressedTokenizer,
+    EngramConfig,
+    EngramsModel,
+    MultiHeadEmbedding,
+    NgramHashMapping,
+    engram_cfg,
+    generate_text,
+)
 
 DEFAULT_CONFIG = {
     "vocab_size": 129280,                                   # Vocabulary size (prev 50257)
@@ -63,6 +72,222 @@ def test_generation_no_engrams_no_cache():
     decoded_output = tokenizer.decode(output_ids.squeeze(0).tolist())
 
     assert decoded_output is not None
+
+def test_multi_head_embedding_shape():
+    embedding = MultiHeadEmbedding(list_of_N=[7, 11, 13], D=5)
+    input_ids = torch.tensor([[[0, 1, 2], [3, 4, 5]]], dtype=torch.long)
+
+    output = embedding(input_ids)
+
+    assert output.shape == (1, 2, 3, 5)
+
+def test_ngram_hash_mapping_shape_and_range():
+    tokenizer = AutoTokenizer.from_pretrained(
+        engram_cfg.tokenizer_name_or_path,
+        trust_remote_code=True,
+    )
+    input_ids = tokenizer("hello world", return_tensors="pt").input_ids
+
+    mapping = NgramHashMapping(
+        engram_vocab_size=[17, 19],
+        max_ngram_size=3,
+        n_embed_per_ngram=16,
+        n_head_per_ngram=2,
+        layer_ids=[0],
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        pad_id=engram_cfg.pad_id,
+        seed=0,
+    )
+
+    hashes = mapping.hash(input_ids)[0]
+
+    assert hashes.shape == (1, input_ids.shape[1], 4)
+    assert hashes.dtype.kind == "i"
+    assert hashes.min() >= 0
+
+def test_forward_with_small_engrams_config():
+    tokenizer = AutoTokenizer.from_pretrained(
+        engram_cfg.tokenizer_name_or_path,
+        trust_remote_code=True,
+    )
+    input_ids = tokenizer("Hello world", return_tensors="pt").input_ids
+
+    small_engrams_cfg = EngramConfig(
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        engram_vocab_size=[17, 19],
+        max_ngram_size=3,
+        n_embed_per_ngram=16,
+        n_head_per_ngram=4,
+        layer_ids=[0],
+        pad_id=engram_cfg.pad_id,
+        seed=0,
+        kernel_size=2,
+    )
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": small_engrams_cfg,
+    })
+
+    model = EngramsModel(config)
+    logits = model(input_ids)
+
+    assert logits.shape == (1, input_ids.shape[1], config["vocab_size"])
+
+def test_forward_with_small_moe_config():
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+    })
+
+    model = EngramsModel(config)
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+    logits = model(input_ids)
+
+    assert logits.shape == (1, 6, config["vocab_size"])
+
+def test_forward_with_small_mhc_config():
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "hc_mult": 3,
+    })
+
+    model = EngramsModel(config)
+    input_ids = torch.randint(0, config["vocab_size"], (1, 5), dtype=torch.long)
+    logits = model(input_ids)
+
+    assert logits.shape == (1, 5, config["vocab_size"])
+
+def test_generate_with_and_without_cache_match():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 256,
+        "context_length": 32,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [],
+    })
+
+    model = EngramsModel(config)
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+
+    no_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=False)
+    with_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=True)
+
+    assert torch.equal(no_cache, with_cache)
+
+def _load_shared_weights(dst_model, src_model):
+    dst_state = dst_model.state_dict()
+    src_state = src_model.state_dict()
+    shared = {
+        key: value
+        for key, value in src_state.items()
+        if key in dst_state and dst_state[key].shape == value.shape
+    }
+    missing, unexpected = dst_model.load_state_dict(shared, strict=False)
+    assert not unexpected
+    return missing
+
+def test_naive_and_optimized_forward_match_without_engrams():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 129280,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [],
+    })
+
+    optimized = EngramsModel(config)
+    naive = NaiveEngramsModel(config)
+    _load_shared_weights(naive, optimized)
+
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+    optimized_logits = optimized(input_ids, use_cache=False)
+    naive_logits = naive(input_ids, use_cache=False)
+
+    assert torch.allclose(optimized_logits, naive_logits, atol=1e-5, rtol=1e-5)
+
+def test_naive_and_optimized_forward_match_with_small_engrams():
+    torch.manual_seed(0)
+    small_engrams_cfg = EngramConfig(
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        engram_vocab_size=[17, 19],
+        max_ngram_size=3,
+        n_embed_per_ngram=16,
+        n_head_per_ngram=4,
+        layer_ids=[0],
+        pad_id=engram_cfg.pad_id,
+        seed=0,
+        kernel_size=2,
+    )
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 129280,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": small_engrams_cfg,
+    })
+
+    optimized = EngramsModel(config)
+    naive = NaiveEngramsModel(config)
+    _load_shared_weights(naive, optimized)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        engram_cfg.tokenizer_name_or_path,
+        trust_remote_code=True,
+    )
+    input_ids = tokenizer("Hello world", return_tensors="pt").input_ids
+    optimized_logits = optimized(input_ids, use_cache=False, engram_input_ids=input_ids)
+    naive_logits = naive(input_ids, use_cache=False, engram_input_ids=input_ids)
+
+    assert torch.allclose(optimized_logits, naive_logits, atol=1e-5, rtol=1e-5)
+
+def test_naive_and_optimized_generation_match_without_engrams():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [],
+    })
+
+    optimized = EngramsModel(config)
+    naive = NaiveEngramsModel(config)
+    _load_shared_weights(naive, optimized)
+
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+    optimized_out = generate_text(optimized, input_ids, max_new_tokens=4, context_size=16, use_cache=False)
+    naive_out = generate_text_naive(naive, input_ids, max_new_tokens=4, context_size=16)
+
+    assert torch.equal(optimized_out, naive_out)
 
 
 

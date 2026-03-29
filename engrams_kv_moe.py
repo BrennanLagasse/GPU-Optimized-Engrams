@@ -16,6 +16,7 @@ from sympy import isprime
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 from tokenizers import normalizers, Regex 
 
@@ -378,68 +379,143 @@ class MultiHeadEmbedding(nn.Module):
         output = self.embedding(shifted_input_ids)
         
         return output
+
+class DenseFeedForward(nn.Module):
+    """
+    Dense gated MLP fallback used when MoE is disabled.
+    Mirrors the expert MLP structure so the dense and sparse paths stay aligned.
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.fc1 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+        self.fc2 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+        self.fc3 = nn.Linear(cfg["hidden_dim"], cfg["emb_dim"], bias=False)
+
+    def forward(self, x):
+        return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
+
+class ManifoldConstrainedHyperConnection(nn.Module):
+    """
+    Lightweight mHC-style residual wrapper.
+
+    For each token position, compute:
+        x_{l+1} = H_res x_l + H_post^T f(H_pre x_l)
+    where H_res is projected onto the bistochastic manifold with Sinkhorn
+    normalization and H_pre / H_post are simplex weights.
+    """
+
+    def __init__(self, width: int, model_dim: int, sinkhorn_iters: int = 4):
+        super().__init__()
+        self.width = width
+        self.model_dim = model_dim
+        self.sinkhorn_iters = sinkhorn_iters
+
+        if self.width > 1:
+            self.router = nn.Linear(model_dim, width * width + 2 * width, bias=True)
+            diag_bias = torch.full((width, width), -2.0)
+            diag_bias.fill_diagonal_(2.0)
+            self.register_buffer("residual_bias", diag_bias)
+        else:
+            self.router = None
+            self.register_buffer("residual_bias", torch.ones(1, 1))
+
+    def _sinkhorn_project(self, logits: torch.Tensor) -> torch.Tensor:
+        weights = torch.exp(logits)
+        for _ in range(self.sinkhorn_iters):
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            weights = weights / weights.sum(dim=-2, keepdim=True).clamp_min(1e-6)
+        return weights
+
+    def _compute_mixing_weights(self, x: torch.Tensor):
+        if self.width == 1:
+            shape = x.shape[:2] + (1,)
+            ones = torch.ones(shape, device=x.device, dtype=x.dtype)
+            residual = torch.ones(x.shape[:2] + (1, 1), device=x.device, dtype=x.dtype)
+            return ones, ones, residual
+
+        routing_input = x.mean(dim=2)
+        raw = self.router(routing_input)
+        split = self.width
+        pre_logits = raw[..., :split]
+        post_logits = raw[..., split:2 * split]
+        res_logits = raw[..., 2 * split:].view(*x.shape[:2], self.width, self.width)
+        res_logits = res_logits + self.residual_bias.to(device=x.device, dtype=x.dtype)
+
+        pre = torch.softmax(pre_logits, dim=-1)
+        post = torch.softmax(post_logits, dim=-1)
+        residual = self._sinkhorn_project(res_logits)
+        return pre, post, residual
+
+    def forward(self, x: torch.Tensor, op):
+        squeeze_output = False
+        if x.dim() == 3:
+            x = x.unsqueeze(2)
+            squeeze_output = True
+
+        pre, post, residual = self._compute_mixing_weights(x)
+        aggregated = (x * pre.unsqueeze(-1)).sum(dim=2)
+        op_out = op(aggregated)
+        mixed_residual = torch.einsum("btij,btjd->btid", residual, x)
+        updated = mixed_residual + post.unsqueeze(-1) * op_out.unsqueeze(2)
+
+        if squeeze_output:
+            return updated.squeeze(2)
+        return updated
     
 class Engram(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
 
         self.layer_id = layer_id
-        self.hidden_dim = config["hidden_dim"]
-        self.hc_mult = config["hc_mult"]
+        self.model_dim = config["emb_dim"]
+        self.engram_cfg = config.get("engrams_cfg", engram_cfg)
 
         self.hash_mapping = NgramHashMapping(
-            engram_vocab_size=engram_cfg.engram_vocab_size,
-            max_ngram_size = engram_cfg.max_ngram_size,
-            n_embed_per_ngram = engram_cfg.n_embed_per_ngram,
-            n_head_per_ngram = engram_cfg.n_head_per_ngram,
-            layer_ids = engram_cfg.layer_ids,
-            tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            pad_id = engram_cfg.pad_id,
-            seed = engram_cfg.seed,
+            engram_vocab_size=self.engram_cfg.engram_vocab_size,
+            max_ngram_size=self.engram_cfg.max_ngram_size,
+            n_embed_per_ngram=self.engram_cfg.n_embed_per_ngram,
+            n_head_per_ngram=self.engram_cfg.n_head_per_ngram,
+            layer_ids=self.engram_cfg.layer_ids,
+            tokenizer_name_or_path=self.engram_cfg.tokenizer_name_or_path,
+            pad_id=self.engram_cfg.pad_id,
+            seed=self.engram_cfg.seed,
         )
 
         self.multi_head_embedding = MultiHeadEmbedding(
-            list_of_N = [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
-            D = engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
+            list_of_N=[x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
+            D=self.engram_cfg.n_embed_per_ngram // self.engram_cfg.n_head_per_ngram,
         )
 
         self.short_conv = ShortConv(
-            hidden_size = self.hidden_dim,
-            kernel_size = engram_cfg.kernel_size,
-            dilation    = engram_cfg.max_ngram_size,
-            hc_mult     = self.hc_mult,
+            hidden_size=self.model_dim,
+            kernel_size=self.engram_cfg.kernel_size,
+            dilation=self.engram_cfg.max_ngram_size,
+            hc_mult=1,
         )
 
-        engram_hidden_size = (engram_cfg.max_ngram_size-1) * engram_cfg.n_embed_per_ngram
-        self.value_proj = nn.Linear(engram_hidden_size, self.hidden_dim)
-        self.key_projs = nn.ModuleList(
-            [nn.Linear(engram_hidden_size, self.hidden_dim) for _ in range(self.hc_mult)]
-        )
-
-        self.norm1 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
-        self.norm2 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
+        engram_hidden_size = (self.engram_cfg.max_ngram_size - 1) * self.engram_cfg.n_embed_per_ngram
+        self.value_proj = nn.Linear(engram_hidden_size, self.model_dim)
+        self.key_proj = nn.Linear(engram_hidden_size, self.model_dim)
+        self.key_norm = nn.RMSNorm(self.model_dim)
+        self.query_norm = nn.RMSNorm(self.model_dim)
     
-    def forward(self, hidden_states, input_ids):
+    def forward(self, hidden_states, input_ids, precomputed_hashes=None):
         """
-        hidden_states: [B, L, HC_MULT, D]
+        hidden_states: [B, L, D]
         input_ids: [B, L]
         """
-
-        # TODO: Currently hidden states is [B, L, D] form, this will cause some dimension issues
-        if len(hidden_states.shape) == 4:
-            pass
-        elif len(hidden_states.shape) == 3:
-            print("Kludge: adding extra dimensions since mHC not used")
-            raise ValueError
-        else:
-            raise ValueError
-
+        if hidden_states.dim() != 3:
+            raise ValueError("Engram expects aggregated hidden states of shape [B, L, D]")
 
         device = hidden_states.device
 
         # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
-        # TODO: There is some recomputation here, seems quite inefficient
-        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id]).to(device)
+        if precomputed_hashes is None:
+            hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
+        else:
+            hash_values = precomputed_hashes[self.layer_id]
+        hash_input_ids = torch.from_numpy(hash_values[:, -hidden_states.shape[1]:, :]).to(device)
 
         # Retrieve embeddings corresponding with hashes (b, t, (m-1)*h, d)
         embeddings = self.multi_head_embedding(hash_input_ids)
@@ -447,21 +523,15 @@ class Engram(nn.Module):
         # Concatenate all embeddings for n-grams starting at each token (b, t, (m-1)*h*d)
         embeddings = embeddings.flatten(start_dim=-2)
 
-        gates = []
-        for hc_idx in range(self.hc_mult):
-            key = self.key_projs[hc_idx](embeddings)
-            normed_key = self.norm1[hc_idx](key)
-            query = hidden_states[:,:,hc_idx,:]
-            normed_query = self.norm2[hc_idx](query)
-            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(self.hidden_dim)
-            gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
-            gate = gate.sigmoid().unsqueeze(-1)
-            gates.append(gate)
-        gates = torch.stack(gates,dim=2)
-        value = gates * self.value_proj(embeddings).unsqueeze(2)
-        output = value + self.short_conv(value)
+        key = self.key_norm(self.key_proj(embeddings))
+        query = self.query_norm(hidden_states)
+        gate = (key * query).sum(dim=-1) / math.sqrt(self.model_dim)
+        gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+        gate = gate.sigmoid().unsqueeze(-1)
 
-        return output 
+        value = gate * self.value_proj(embeddings)
+        output = value.unsqueeze(2) + self.short_conv(value.unsqueeze(2))
+        return output.squeeze(2)
     
 class MultiHeadAttention(nn.Module):
     def __init__(self, config):
@@ -560,6 +630,11 @@ class MoEFeedForward(nn.Module):
         self.num_experts = cfg["num_experts"]
         self.emb_dim = cfg["emb_dim"]
 
+        if self.num_experts <= 0:
+            raise ValueError("MoEFeedForward requires num_experts > 0")
+        if self.num_experts_per_tok <= 0:
+            raise ValueError("MoEFeedForward requires num_experts_per_tok > 0")
+
         self.gate = nn.Linear(cfg["emb_dim"], cfg["num_experts"], bias=False)
         self.fc1 = nn.ModuleList(
             [
@@ -611,14 +686,12 @@ class MoEFeedForward(nn.Module):
             token_mask = mask.any(dim=-1) # (b*t)
 
             # Get the indices of tokens using the expert
-            select_idx = token_mask.non_zero(as_tuple=False).squeeze(-1) # [b*t]
+            select_idx = token_mask.nonzero(as_tuple=False).squeeze(-1) # [b*t]
 
             # Compute the forward pass for the tokens using the expert
             expert_in = x_flat.index_select(0, select_idx)
-
-            expert_out = self.fc1[expert_id](expert_in) * self.fc2[expert_id](expert_in)
-            expert_out = torch.nn.SilU(expert_out) # SiLU used for MoE
-            expert_out = self.fc3[expert_id](expert_out)
+            expert_hidden = F.silu(self.fc1[expert_id](expert_in)) * self.fc2[expert_id](expert_in)
+            expert_out = self.fc3[expert_id](expert_hidden)
 
             # Determine probability assigned to each head
             mask_selected = mask[select_idx]
@@ -628,7 +701,7 @@ class MoEFeedForward(nn.Module):
             )
 
             # Compute output as a weighted sum of outputs by probabilities
-            out_flat.index_add_(0, select_idx, expert_out * selected_probs.unsqueeze(-1))
+            out_flat.index_add_(0, select_idx, expert_out * selected_probs)
 
         return out_flat.reshape(batch, seq_len, self.emb_dim)
 
@@ -648,46 +721,52 @@ class LayerNorm(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
+        self.hc_mult = config["hc_mult"]
         self.attn = MultiHeadAttention(config)
-        self.moe = MoEFeedForward(config)
+        if config["num_experts"] > 0:
+            self.ff = MoEFeedForward(config)
+        else:
+            self.ff = DenseFeedForward(config)
         self.norm1 = LayerNorm(config["emb_dim"])
         self.norm2 = LayerNorm(config["emb_dim"])
         self.norm3 = LayerNorm(config["emb_dim"])
+        self.hc_attn = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        self.hc_ff = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
         self.engram = None
         if layer_id in config["layer_ids"]:
             self.engram = Engram(config=config, layer_id=layer_id)
+            self.hc_engram = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        else:
+            self.hc_engram = None
     
-    def forward(self, input_ids, x, use_cache=False):
-
-        # Note that all residual units are pre-norm
-
-        if use_cache:
-            raise NotImplementedError
+    def forward(self, input_ids, x, use_cache=False, engram_hashes=None):
 
         # (Engram Layer Only) Engram + Residual Connection
         if self.engram is not None:
-            shortcut = x
-            x = self.norm1(x)
-            x = self.engram(hidden_states=x, input_ids=input_ids)
-            x = x + shortcut
+            x = self.hc_engram(
+                x,
+                lambda agg: self.engram(
+                    hidden_states=self.norm1(agg),
+                    input_ids=input_ids,
+                    precomputed_hashes=engram_hashes,
+                ),
+            )
         
         # Attention + Residual Connection
-        shortcut = x
-        x = self.norm2(x)
-        x = self.attn(x, use_cache) 
-        x = x + shortcut
+        x = self.hc_attn(x, lambda agg: self.attn(self.norm2(agg), use_cache))
 
         # FFN + Residual Connection
-        shortcut = x
-        x = self.norm3(x)
-        x = self.moe(x)
-        x = x + shortcut
+        x = self.hc_ff(x, lambda agg: self.ff(self.norm3(agg)))
 
         return x
+
+    def reset_cache(self):
+        self.attn.reset_cache()
     
 class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
 
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
         self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
@@ -699,30 +778,52 @@ class EngramsModel(nn.Module):
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
 
-        assert config["hc_mult"] == 1, "Hyper-Connections not yet supported"
-
     
-    def forward(self, input_ids, use_cache=False):
+    def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
 
         # Figure out positional embeddings based on shift
         _, seq_len = input_ids.shape
-        if use_cache:
-            raise NotImplementedError
-        else:
-            pos_ids = torch.arange(start=0, end=seq_len, device=input_ids.device, dtype=torch.long)
+        pos_ids = torch.arange(
+            start=position_offset,
+            end=position_offset + seq_len,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
 
         token_embeds = self.token_embed(input_ids)
         pos_embeds = self.pos_embed(pos_ids)
         x = token_embeds + pos_embeds
         x = self.drop_emb(x)
+
+        if self.config["hc_mult"] > 1:
+            x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
+
+        engram_hashes = None
+        if engram_input_ids is None:
+            engram_input_ids = input_ids
+        if any(block.engram is not None for block in self.transformer_blocks):
+            first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
+            engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
         for block in self.transformer_blocks:
-            x = block(input_ids=input_ids, x=x, use_cache=use_cache)
+            x = block(
+                input_ids=engram_input_ids,
+                x=x,
+                use_cache=use_cache,
+                engram_hashes=engram_hashes,
+            )
+
+        if x.dim() == 4:
+            x = x.mean(dim=2)
 
         x = self.final_norm(x)
         logits = self.out_head(x)
 
         return logits
+
+    def reset_cache(self):
+        for block in self.transformer_blocks:
+            block.reset_cache()
 
 def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache=True):
     """
@@ -737,6 +838,8 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
     # TODO: look into CUDA synchronization
 
     model.eval()
+    model.reset_cache()
+    model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg", engram_cfg)
 
     context_len = context_size or 256
     batch_size, base_len = input_ids.shape
@@ -749,12 +852,39 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
 
     with torch.no_grad():
         if use_cache:
-            # TODO: Implement
-            raise NotImplementedError
+            logits = model(
+                input_ids,
+                use_cache=True,
+                position_offset=0,
+                engram_input_ids=input_ids,
+            )
+            next_idx = logits[:, -1].argmax(dim=-1)
+            out[:, current_len] = next_idx
+            current_len += 1
+
+            for _ in range(1, max_new_tokens):
+                step_input = out[:, current_len - 1:current_len]
+                engram_start = max(0, current_len - model_engrams_cfg.max_ngram_size + 1)
+                engram_input_ids = out[:, engram_start:current_len]
+                logits = model(
+                    step_input,
+                    use_cache=True,
+                    position_offset=current_len - 1,
+                    engram_input_ids=engram_input_ids,
+                )
+                next_idx = logits[:, -1].argmax(dim=-1)
+                out[:, current_len] = next_idx
+                current_len += 1
         else:
             for _ in range(max_new_tokens):
                 context_start = max(0, current_len - context_len)
-                logits = model(input_ids[:, context_start:current_len], use_cache=False)
+                window = out[:, context_start:current_len]
+                logits = model(
+                    window,
+                    use_cache=False,
+                    position_offset=context_start,
+                    engram_input_ids=window,
+                )
                 next_idx = logits[:, -1].argmax(dim=-1)
                 out[:, current_len] = next_idx
                 current_len += 1
@@ -778,6 +908,12 @@ def main():
         type=int,
         default=0,
         help="Number of experts. If 0, use dense FFN. If >0, use MoE.",
+    )
+    parser.add_argument(
+        "--num_experts_per_tok",
+        type=int,
+        default=2,
+        help="Number of routed experts per token when MoE is enabled.",
     )
     args = parser.parse_args()
 
