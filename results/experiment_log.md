@@ -59,6 +59,18 @@
   - dense optimized now beats naive on the H200
   - Engram remains the main unresolved GPU bottleneck
 
+## 2026-04-02 18:58 EDT
+- Implemented a Torch-native optimized Engram hash path to avoid NumPy-to-Torch conversions during GPU inference.
+- Pushed the change as commit `10328c2` and refreshed the cluster clone.
+- Re-ran the tiny Engram H200 benchmark (`176,720` params):
+  - naive: `279.32 tok/s`
+  - optimized no-cache: `256.96 tok/s`
+  - optimized cache: `225.21 tok/s`
+- Result:
+  - the Torch-native hash path did not fix the Engram GPU regression on the tiny benchmark
+  - this suggests the remaining bottleneck is not just the CPU/NumPy conversion path
+  - next likely targets are the embedding/projection/short-conv path and the cached decode regime itself
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
