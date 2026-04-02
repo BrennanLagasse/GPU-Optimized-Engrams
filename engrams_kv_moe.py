@@ -740,6 +740,20 @@ class TransformerBlock(nn.Module):
             self.hc_engram = None
     
     def forward(self, input_ids, x, use_cache=False, engram_hashes=None):
+        if self.hc_mult == 1:
+            if x.dim() != 3:
+                raise ValueError("Expected [B, L, D] hidden states when hc_mult == 1")
+
+            if self.engram is not None:
+                x = x + self.engram(
+                    hidden_states=self.norm1(x),
+                    input_ids=input_ids,
+                    precomputed_hashes=engram_hashes,
+                )
+
+            x = x + self.attn(self.norm2(x), use_cache)
+            x = x + self.ff(self.norm3(x))
+            return x
 
         # (Engram Layer Only) Engram + Residual Connection
         if self.engram is not None:

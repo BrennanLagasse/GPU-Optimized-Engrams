@@ -24,6 +24,64 @@ from engrams_kv_moe import (
 )
 
 
+class NaiveManifoldConstrainedHyperConnection(nn.Module):
+    """
+    Straightforward mHC implementation used to keep the naive path
+    semantically aligned with the optimized model.
+    """
+
+    def __init__(self, width, model_dim, sinkhorn_iters=4):
+        super().__init__()
+        self.width = width
+        self.model_dim = model_dim
+        self.sinkhorn_iters = sinkhorn_iters
+
+        if self.width > 1:
+            self.router = nn.Linear(model_dim, width * width + 2 * width, bias=True)
+            diag_bias = torch.full((width, width), -2.0)
+            diag_bias.fill_diagonal_(2.0)
+            self.register_buffer("residual_bias", diag_bias)
+        else:
+            self.router = None
+            self.register_buffer("residual_bias", torch.ones(1, 1))
+
+    def _sinkhorn_project(self, logits):
+        weights = torch.exp(logits)
+        for _ in range(self.sinkhorn_iters):
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            weights = weights / weights.sum(dim=-2, keepdim=True).clamp_min(1e-6)
+        return weights
+
+    def forward(self, x, op):
+        squeeze_output = False
+        if x.dim() == 3:
+            x = x.unsqueeze(2)
+            squeeze_output = True
+
+        if self.width == 1:
+            aggregated = x[:, :, 0, :]
+            updated = x + op(aggregated).unsqueeze(2)
+            return updated.squeeze(2) if squeeze_output else updated
+
+        routing_input = x.mean(dim=2)
+        raw = self.router(routing_input)
+        pre_logits = raw[..., :self.width]
+        post_logits = raw[..., self.width:2 * self.width]
+        res_logits = raw[..., 2 * self.width:].view(*x.shape[:2], self.width, self.width)
+        res_logits = res_logits + self.residual_bias.to(device=x.device, dtype=x.dtype)
+
+        pre = torch.softmax(pre_logits, dim=-1)
+        post = torch.softmax(post_logits, dim=-1)
+        residual = self._sinkhorn_project(res_logits)
+
+        aggregated = (x * pre.unsqueeze(-1)).sum(dim=2)
+        op_out = op(aggregated)
+        mixed_residual = torch.einsum("btij,btjd->btid", residual, x)
+        updated = mixed_residual + post.unsqueeze(-1) * op_out.unsqueeze(2)
+
+        return updated.squeeze(2) if squeeze_output else updated
+
+
 class NaiveEngram(nn.Module):
     """
     Straightforward Engram block.
@@ -31,8 +89,7 @@ class NaiveEngram(nn.Module):
     Differences from the optimized path:
     - recomputes hashes every forward pass
     - does not precompute hashes across layers
-    - does not use mHC
-    - keeps the residual stream as a single branch
+    - does not precompute hashes across layers
     """
 
     def __init__(self, config, layer_id):
@@ -84,6 +141,7 @@ class NaiveEngram(nn.Module):
 class NaiveTransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
+        self.hc_mult = config["hc_mult"]
         self.attn = MultiHeadAttention(config)
         if config["num_experts"] > 0:
             self.ff = MoEFeedForward(config)
@@ -92,15 +150,20 @@ class NaiveTransformerBlock(nn.Module):
         self.norm1 = LayerNorm(config["emb_dim"])
         self.norm2 = LayerNorm(config["emb_dim"])
         self.norm3 = LayerNorm(config["emb_dim"])
+        self.hc_attn = NaiveManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        self.hc_ff = NaiveManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
         self.engram = None
         if layer_id in config["layer_ids"]:
             self.engram = NaiveEngram(config=config, layer_id=layer_id)
+            self.hc_engram = NaiveManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        else:
+            self.hc_engram = None
 
     def forward(self, input_ids, x):
         if self.engram is not None:
-            x = x + self.engram(self.norm1(x), input_ids)
-        x = x + self.attn(self.norm2(x), use_cache=False)
-        x = x + self.ff(self.norm3(x))
+            x = self.hc_engram(x, lambda agg: self.engram(self.norm1(agg), input_ids))
+        x = self.hc_attn(x, lambda agg: self.attn(self.norm2(agg), use_cache=False))
+        x = self.hc_ff(x, lambda agg: self.ff(self.norm3(agg)))
         return x
 
 
@@ -128,10 +191,14 @@ class NaiveEngramsModel(nn.Module):
             dtype=torch.long,
         )
         x = self.drop_emb(self.token_embed(input_ids) + self.pos_embed(pos_ids))
+        if self.config["hc_mult"] > 1:
+            x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
         if engram_input_ids is None:
             engram_input_ids = input_ids
         for block in self.transformer_blocks:
             x = block(engram_input_ids, x)
+        if x.dim() == 4:
+            x = x.mean(dim=2)
         x = self.final_norm(x)
         return self.out_head(x)
 

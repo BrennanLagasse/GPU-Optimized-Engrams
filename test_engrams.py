@@ -266,6 +266,30 @@ def test_naive_and_optimized_forward_match_with_small_engrams():
 
     assert torch.allclose(optimized_logits, naive_logits, atol=1e-5, rtol=1e-5)
 
+def test_naive_and_optimized_forward_match_with_mhc():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 512,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [],
+        "hc_mult": 3,
+    })
+
+    optimized = EngramsModel(config)
+    naive = NaiveEngramsModel(config)
+    _load_shared_weights(naive, optimized)
+
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+    optimized_logits = optimized(input_ids, use_cache=False)
+    naive_logits = naive(input_ids, use_cache=False)
+
+    assert torch.allclose(optimized_logits, naive_logits, atol=1e-5, rtol=1e-5)
+
 def test_naive_and_optimized_generation_match_without_engrams():
     torch.manual_seed(0)
     config = DEFAULT_CONFIG.copy()
@@ -277,6 +301,30 @@ def test_naive_and_optimized_generation_match_without_engrams():
         "n_heads": 4,
         "n_layers": 2,
         "layer_ids": [],
+    })
+
+    optimized = EngramsModel(config)
+    naive = NaiveEngramsModel(config)
+    _load_shared_weights(naive, optimized)
+
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+    optimized_out = generate_text(optimized, input_ids, max_new_tokens=4, context_size=16, use_cache=False)
+    naive_out = generate_text_naive(naive, input_ids, max_new_tokens=4, context_size=16)
+
+    assert torch.equal(optimized_out, naive_out)
+
+def test_naive_and_optimized_generation_match_with_mhc():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [],
+        "hc_mult": 3,
     })
 
     optimized = EngramsModel(config)
