@@ -84,34 +84,37 @@ Cluster environment:
 - Torch build used for GPU runs: `torch 2.11.0+cu128`
 - CUDA availability check: `torch.cuda.is_available() == True`
 - Benchmark dtype: `float32` (script default)
-- Synced branch/commit benchmarked on cluster: `engrams-baseline-benchmarking` at `1c4f28c`
+- Synced branch/commit benchmarked on cluster: `engrams-baseline-benchmarking` at `1ee7045`
 
 Cluster validation:
-- `pytest -q test_engrams.py` passed on the cluster copy: `11 passed in 24.49s`
+- `pytest -q test_engrams.py` passed on the updated cluster copy: `13 passed in 23.72s`
 
 ### H200 GPU decode
 
 | Case | Impl | Avg seconds | Tokens/s | Relative improvement |
 | --- | --- | ---: | ---: | ---: |
-| tiny dense | naive | 0.0424 | 377.20 | baseline |
-| tiny dense | optimized no-cache | 0.0476 | 335.98 | -10.93% vs naive |
-| tiny dense | optimized cache | 0.0484 | 330.80 | -12.30% vs naive |
-| tiny Engram | naive | 0.0570 | 280.51 | baseline |
-| tiny Engram | optimized no-cache | 0.0626 | 255.69 | -8.85% vs naive |
-| tiny Engram | optimized cache | 0.0721 | 221.97 | -20.87% vs naive |
-| tiny mHC dense | optimized | 0.0574 | 278.83 | n/a |
-| medium-local-1 dense | naive | 0.0790 | 405.00 | baseline |
-| medium-local-1 dense | optimized cache | 0.0946 | 338.39 | -16.45% vs naive |
-| medium-local-2 dense | naive | 0.0926 | 345.56 | baseline |
-| medium-local-2 dense | optimized cache | 0.1137 | 281.44 | -18.56% vs naive |
-| large-local dense | naive | 0.1209 | 264.62 | baseline |
-| large-local dense | optimized cache | 0.1486 | 215.36 | -18.62% vs naive |
+| tiny dense | naive | 0.0435 | 367.45 | baseline |
+| tiny dense | optimized no-cache | 0.0429 | 372.79 | +1.45% vs naive |
+| tiny dense | optimized cache | 0.0434 | 368.28 | +0.23% vs naive |
+| tiny Engram | naive | 0.0580 | 275.73 | baseline |
+| tiny Engram | optimized no-cache | 0.0584 | 274.03 | -0.62% vs naive |
+| tiny Engram | optimized cache | 0.0675 | 237.03 | -14.03% vs naive |
+| tiny mHC dense (`hc_mult=4`) | naive | 0.0574 | 278.55 | baseline |
+| tiny mHC dense (`hc_mult=4`) | optimized | 0.0574 | 278.51 | -0.01% vs naive |
+| medium-local-1 dense | naive | 0.0823 | 388.97 | baseline |
+| medium-local-1 dense | optimized cache | 0.0759 | 421.82 | +8.45% vs naive |
+| medium-local-2 dense | naive | 0.0978 | 327.36 | baseline |
+| medium-local-2 dense | optimized cache | 0.0888 | 360.54 | +10.14% vs naive |
+| large-local dense | naive | 0.1266 | 252.73 | baseline |
+| large-local dense | optimized cache | 0.1151 | 278.09 | +10.03% vs naive |
 
 Observations:
-- The current optimized implementation does not yet outperform the naive implementation on the single-H200 benchmark matrix collected here.
-- Unlike the local CPU results, the GPU runs suggest the current optimized path is paying extra overhead that is not being offset by cache/hash reuse at these model sizes and decode lengths.
-- The negative deltas persist from tiny through the 138.5M-parameter dense tier, so this is not just tiny-model launch noise.
-- This means step 4 is not complete in the proposal sense: the current "optimized" path still needs GPU-focused optimization before multi-GPU scaling claims would be credible.
+- The `hc_mult = 1` fast path materially improved the dense GPU results.
+- On the updated H200 run, the optimized implementation now beats naive across the dense tiers from tiny through the 138.5M-parameter tier.
+- The gain is small at the tiniest scale, which is consistent with kernel-launch and framework overhead dominating there.
+- The gain becomes clearer at larger dense scales, reaching about `+8.45%` to `+10.14%` on the `8.4M` to `138.5M` parameter tiers.
+- The Engram path still needs more work: optimized no-cache is only near parity with naive, and the cached Engram path is still slower on the tiny benchmark.
+- The `hc_mult = 4` tiny mHC comparison is now effectively at parity between naive and optimized, which is what we expect from the semantic alignment work.
 
 ## Can We Match The Paper's Speed Claims?
 
@@ -119,11 +122,11 @@ Not yet demonstrated.
 
 What we can say now:
 - The optimized implementation clearly beats the naive implementation on local CPU dense benchmarks.
-- The current optimized Engram path still needs more work, since the local Engram no-cache case is not yet better than naive.
-- We now have a trustworthy single-H200 GPU benchmark run on the authoritative branch, and the current optimized path is slower than naive across the collected GPU matrix.
+- The optimized dense path now also beats naive on the updated single-H200 GPU matrix after adding the `hc_mult = 1` fast path.
+- The current optimized Engram path still needs more work, since the local and H200 Engram results are not yet clearly better than naive.
 
 What is still missing before making a claim against the paper:
 - running substantially larger models than the current local tiers
 - comparing against the paper on something closer to its scale and hardware assumptions
-- improving the optimized path enough that it actually beats the naive baseline on GPU
-- confirming whether the optimized Engram path, not just the dense cached path, improves at realistic GPU scale
+- improving the optimized Engram path, not just the dense cached path
+- confirming that the observed dense GPU gains persist as scale increases toward the multi-billion-parameter regime
