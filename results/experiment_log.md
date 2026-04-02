@@ -90,6 +90,24 @@
   - the new path removes that extra Python/list/concat work for the Engram case
 - Local validation after the change: `13 passed in 62.69s`.
 
+## 2026-04-02 19:23 EDT
+- Pulled commit `e595e39` onto the cluster and re-ran the tiny Engram H200 benchmark plus the component profiler.
+- Tiny Engram benchmark (`176,720` params) after the single-layer shortcut and `ShortConv` fast path:
+  - naive: `277.07 tok/s`
+  - optimized no-cache: `255.85 tok/s`
+  - optimized cache: `224.34 tok/s`
+- Component profile on H200 after the `ShortConv` fast path:
+  - hash: `0.000157 s`
+  - embedding: `0.000035 s`
+  - projection/gating: `0.000102 s`
+  - short conv: `0.001661 s`
+  - full Engram: `0.000343 s`
+- Result:
+  - the Engram regression is still present on the tiny H200 benchmark
+  - embedding lookup is negligible
+  - hashing and projection are small relative to the short-conv measurement
+  - the next likely optimization target is not the hash path anymore; it is the Engram compute structure itself, especially the convolution-heavy local path and how it interacts with tiny decode workloads
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
