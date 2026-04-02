@@ -849,6 +849,7 @@ class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.engram_layer_ids = set(config["layer_ids"])
 
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
         self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
@@ -857,6 +858,7 @@ class EngramsModel(nn.Module):
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(config, layer_id=id) for id in range(config["n_layers"])]
         )
+        self.num_engram_layers = sum(1 for block in self.transformer_blocks if block.engram is not None)
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
 
@@ -883,7 +885,7 @@ class EngramsModel(nn.Module):
         engram_hashes = None
         if engram_input_ids is None:
             engram_input_ids = input_ids
-        if any(block.engram is not None for block in self.transformer_blocks):
+        if self.num_engram_layers > 1:
             first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
             if torch.is_tensor(engram_input_ids):
                 engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)

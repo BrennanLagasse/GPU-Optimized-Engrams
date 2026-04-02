@@ -71,6 +71,17 @@
   - this suggests the remaining bottleneck is not just the CPU/NumPy conversion path
   - next likely targets are the embedding/projection/short-conv path and the cached decode regime itself
 
+## 2026-04-02 19:08 EDT
+- Added a single-layer optimized Engram shortcut so the model only precomputes hash tables when multiple Engram layers are present.
+- Added `scripts/profile_engram_components.py` to time optimized Engram subcomponents independently:
+  - hashing
+  - embedding lookup
+  - projection/gating
+  - short convolution
+  - full Engram forward
+- Local smoke profile on the tiny Engram config (`176,720` params, CPU) completed successfully.
+- Local validation after the shortcut/profiler changes: `13 passed in 45.12s`.
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
