@@ -151,6 +151,13 @@ class ShortConv(nn.Module):
         
         assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
 
+        if G == 1:
+            chunk = self.norms[0](x[:, :, 0, :])
+            y_bct = self.conv(chunk.transpose(1, 2))[..., :T]
+            if self.activation:
+                y_bct = self.act_fn(y_bct)
+            return y_bct.transpose(1, 2).unsqueeze(2).contiguous()
+
         normed_chunks = []
         for i in range(G):
             chunk = x[:, :, i, :]

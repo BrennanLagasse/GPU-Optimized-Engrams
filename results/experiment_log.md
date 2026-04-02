@@ -82,6 +82,14 @@
 - Local smoke profile on the tiny Engram config (`176,720` params, CPU) completed successfully.
 - Local validation after the shortcut/profiler changes: `13 passed in 45.12s`.
 
+## 2026-04-02 19:16 EDT
+- Added a dedicated `hc_mult = 1` fast path inside `ShortConv.forward`.
+- Motivation:
+  - Engram always uses `ShortConv(..., hc_mult = 1)`
+  - the previous implementation still looped over groups, normalized into a list, and concatenated, even when there was only one group
+  - the new path removes that extra Python/list/concat work for the Engram case
+- Local validation after the change: `13 passed in 62.69s`.
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
