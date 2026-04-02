@@ -231,6 +231,8 @@ class NgramHashMapping:
             self.layer_multipliers[layer_id] = multipliers
 
         self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
+        self.lookup_table_torch = torch.from_numpy(self.compressed_tokenizer.lookup_table.copy()).long()
+        self._torch_cache = {}
 
     def calculate_vocab_size_across_layers(self):
         """ Returns a dictionary indexed by layer id with entries of dim (m-1, h) """
@@ -339,6 +341,65 @@ class NgramHashMapping:
         hash_ids_for_all_layers = {}
         for layer_id in self.layer_ids:
             hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
+        return hash_ids_for_all_layers
+
+    def _get_torch_constants(self, device):
+        key = str(device)
+        if key not in self._torch_cache:
+            layer_multipliers = {
+                layer_id: torch.tensor(multipliers, device=device, dtype=torch.long)
+                for layer_id, multipliers in self.layer_multipliers.items()
+            }
+            vocab_sizes = {
+                layer_id: [
+                    torch.tensor(head_vocab_sizes, device=device, dtype=torch.long)
+                    for head_vocab_sizes in self.vocab_size_across_layers[layer_id]
+                ]
+                for layer_id in self.layer_ids
+            }
+            self._torch_cache[key] = {
+                "lookup_table": self.lookup_table_torch.to(device=device),
+                "layer_multipliers": layer_multipliers,
+                "vocab_sizes": vocab_sizes,
+            }
+        return self._torch_cache[key]
+
+    def hash_tensor(self, input_ids: torch.Tensor):
+        """
+        Torch-native hash path used by the optimized implementation to avoid
+        CPU/NumPy round-trips during GPU inference.
+        """
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.long()
+
+        consts = self._get_torch_constants(input_ids.device)
+        compressed = consts["lookup_table"][input_ids]
+        B, T = compressed.shape
+
+        base_shifts = []
+        for k in range(self.max_ngram_size):
+            if k == 0:
+                shifted = compressed
+            else:
+                shifted = F.pad(compressed, (k, 0), value=self.pad_id)[:, :T]
+            base_shifts.append(shifted)
+
+        hash_ids_for_all_layers = {}
+        for layer_id in self.layer_ids:
+            multipliers = consts["layer_multipliers"][layer_id]
+            all_hashes = []
+            for n in range(2, self.max_ngram_size + 1):
+                n_gram_index = n - 2
+                mix = base_shifts[0] * multipliers[0]
+                for k in range(1, n):
+                    mix = torch.bitwise_xor(mix, base_shifts[k] * multipliers[k])
+
+                head_vocab_sizes = consts["vocab_sizes"][layer_id][n_gram_index]
+                for j in range(self.n_head_per_ngram):
+                    all_hashes.append(torch.remainder(mix, head_vocab_sizes[j]))
+
+            hash_ids_for_all_layers[layer_id] = torch.stack(all_hashes, dim=2)
+
         return hash_ids_for_all_layers
 
 class MultiHeadEmbedding(nn.Module):
@@ -512,10 +573,17 @@ class Engram(nn.Module):
 
         # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
         if precomputed_hashes is None:
-            hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
+            if torch.is_tensor(input_ids):
+                hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
+            else:
+                hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
         else:
             hash_values = precomputed_hashes[self.layer_id]
-        hash_input_ids = torch.from_numpy(hash_values[:, -hidden_states.shape[1]:, :]).to(device)
+
+        if torch.is_tensor(hash_values):
+            hash_input_ids = hash_values[:, -hidden_states.shape[1]:, :].to(device=device, dtype=torch.long)
+        else:
+            hash_input_ids = torch.from_numpy(hash_values[:, -hidden_states.shape[1]:, :]).to(device)
 
         # Retrieve embeddings corresponding with hashes (b, t, (m-1)*h, d)
         embeddings = self.multi_head_embedding(hash_input_ids)
@@ -817,7 +885,10 @@ class EngramsModel(nn.Module):
             engram_input_ids = input_ids
         if any(block.engram is not None for block in self.transformer_blocks):
             first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
-            engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
+            if torch.is_tensor(engram_input_ids):
+                engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
+            else:
+                engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
         for block in self.transformer_blocks:
             x = block(
