@@ -84,7 +84,7 @@ Cluster environment:
 - Torch build used for GPU runs: `torch 2.11.0+cu128`
 - CUDA availability check: `torch.cuda.is_available() == True`
 - Benchmark dtype: `float32` (script default)
-- Synced branch/commit benchmarked on cluster: `engrams-baseline-benchmarking` at `1ee7045`
+- Synced branch/commit benchmarked on cluster: `engrams-baseline-benchmarking` at `12a35f7`
 
 Cluster validation:
 - `pytest -q test_engrams.py` passed on the updated cluster copy: `13 passed in 23.72s`
@@ -115,6 +115,25 @@ Observations:
 - The gain becomes clearer at larger dense scales, reaching about `+8.45%` to `+10.14%` on the `8.4M` to `138.5M` parameter tiers.
 - The Engram path still needs more work: optimized no-cache is only near parity with naive, and the cached Engram path is still slower on the tiny benchmark.
 - The `hc_mult = 4` tiny mHC comparison is now effectively at parity between naive and optimized, which is what we expect from the semantic alignment work.
+
+### H200 Engram short-conv ablation
+
+Tiny Engram ablation config:
+- same tiny Engram backbone as above, about `176,720` params in the standard path
+- disabling `ShortConv` reduces the tiny Engram parameter count slightly to about `176,528`
+
+| Case | Avg seconds | Tokens/s | Relative change |
+| --- | ---: | ---: | ---: |
+| tiny Engram optimized no-cache | 0.0630 | 254.08 | baseline |
+| tiny Engram optimized no-cache, no short-conv | 0.0621 | 257.84 | +1.48% |
+| tiny Engram optimized cache | 0.0797 | 200.75 | baseline |
+| tiny Engram optimized cache, no short-conv | 0.0607 | 263.66 | +31.34% |
+
+Observations:
+- Removing `ShortConv` barely changes the no-cache tiny Engram result on H200.
+- Removing `ShortConv` materially improves the cached tiny Engram result on H200.
+- That points to `ShortConv` as a decode-time problem primarily in the cached Engram path, not as the whole explanation for the optimized Engram gap.
+- The next Engram optimization pass should target cached inference structure around local mixing, not just the hash path.
 
 ## Can We Match The Paper's Speed Claims?
 

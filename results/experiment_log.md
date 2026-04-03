@@ -119,6 +119,23 @@
   - rerun the tiny H200 Engram benchmark with `--disable-short-conv`
   - compare against the standard Engram path to confirm whether the convolution branch is the dominant source of the GPU regression
 
+## 2026-04-03 13:12 EDT
+- Pulled commit `12a35f7` onto `gpu003` and ran the tiny Engram short-conv ablation on one H200.
+- Tiny Engram benchmark size remained about `176,720` params for the standard path and about `176,528` params with `ShortConv` disabled.
+- H200 no-cache ablation results:
+  - optimized standard Engram: `254.08 tok/s`
+  - optimized Engram with `--disable-short-conv`: `257.84 tok/s`
+  - relative change from disabling `ShortConv`: about `+1.48%`
+- H200 cache-on ablation results:
+  - optimized standard Engram cache: `200.75 tok/s`
+  - optimized Engram cache with `--disable-short-conv`: `263.66 tok/s`
+  - relative change from disabling `ShortConv`: about `+31.34%`
+- H200 component profile with `ShortConv` disabled showed `short_conv_seconds` collapsing to about `5.11e-06 s`.
+- Interpretation:
+  - `ShortConv` is not the main reason the optimized Engram no-cache path is only near parity with naive on the tiny benchmark
+  - `ShortConv` is, however, a major contributor to the cached Engram regression on the tiny H200 decode path
+  - the next Engram optimization pass should focus on cached decode structure and on whether local convolution should be bypassed, fused, or made conditional during inference
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
