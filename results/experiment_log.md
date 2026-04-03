@@ -108,6 +108,17 @@
   - hashing and projection are small relative to the short-conv measurement
   - the next likely optimization target is not the hash path anymore; it is the Engram compute structure itself, especially the convolution-heavy local path and how it interacts with tiny decode workloads
 
+## 2026-04-03 00:12 EDT
+- Added an Engram ablation flag (`use_short_conv`) so the local-mixing `ShortConv` branch can be disabled cleanly for profiling and benchmarking.
+- Updated the benchmark and component-profiler scripts to accept `--disable-short-conv`.
+- Local smoke checks with `ShortConv` disabled:
+  - tiny Engram parameter count dropped from about `176,720` to about `176,528`
+  - CPU Engram component profile showed `full_engram_seconds` dropping to about `0.000149 s`
+  - local optimized Engram decode without `ShortConv` ran successfully
+- Next step:
+  - rerun the tiny H200 Engram benchmark with `--disable-short-conv`
+  - compare against the standard Engram path to confirm whether the convolution branch is the dominant source of the GPU regression
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.

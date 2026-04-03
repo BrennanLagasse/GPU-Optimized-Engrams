@@ -31,6 +31,7 @@ class EngramConfig:
     pad_id: int = 2
     seed: int = 0
     kernel_size: int = 4
+    use_short_conv: bool = True
     
 engram_cfg = EngramConfig()
 
@@ -560,7 +561,7 @@ class Engram(nn.Module):
             kernel_size=self.engram_cfg.kernel_size,
             dilation=self.engram_cfg.max_ngram_size,
             hc_mult=1,
-        )
+        ) if self.engram_cfg.use_short_conv else None
 
         engram_hidden_size = (self.engram_cfg.max_ngram_size - 1) * self.engram_cfg.n_embed_per_ngram
         self.value_proj = nn.Linear(engram_hidden_size, self.model_dim)
@@ -605,6 +606,9 @@ class Engram(nn.Module):
         gate = gate.sigmoid().unsqueeze(-1)
 
         value = gate * self.value_proj(embeddings)
+        if self.short_conv is None:
+            return value
+
         output = value.unsqueeze(2) + self.short_conv(value.unsqueeze(2))
         return output.squeeze(2)
     

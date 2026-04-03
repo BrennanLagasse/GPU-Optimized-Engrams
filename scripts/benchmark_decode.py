@@ -35,6 +35,7 @@ def build_config(args):
             pad_id=engram_cfg.pad_id,
             seed=engram_cfg.seed,
             kernel_size=args.kernel_size,
+            use_short_conv=not args.disable_short_conv,
         ),
     }
 
@@ -64,6 +65,7 @@ def main():
     parser.add_argument("--n-embed-per-ngram", type=int, default=32)
     parser.add_argument("--n-head-per-ngram", type=int, default=4)
     parser.add_argument("--kernel-size", type=int, default=2)
+    parser.add_argument("--disable-short-conv", action="store_true")
     args = parser.parse_args()
 
     torch.manual_seed(0)
