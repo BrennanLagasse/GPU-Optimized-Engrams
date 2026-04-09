@@ -133,8 +133,40 @@
 - H200 component profile with `ShortConv` disabled showed `short_conv_seconds` collapsing to about `5.11e-06 s`.
 - Interpretation:
   - `ShortConv` is not the main reason the optimized Engram no-cache path is only near parity with naive on the tiny benchmark
-  - `ShortConv` is, however, a major contributor to the cached Engram regression on the tiny H200 decode path
-  - the next Engram optimization pass should focus on cached decode structure and on whether local convolution should be bypassed, fused, or made conditional during inference
+- `ShortConv` is, however, a major contributor to the cached Engram regression on the tiny H200 decode path
+- the next Engram optimization pass should focus on cached decode structure and on whether local convolution should be bypassed, fused, or made conditional during inference
+
+## 2026-04-09 11:33 EDT
+- Implemented an exact cached-step `ShortConv` fast path in the optimized model.
+- Rationale:
+  - cached Engram decode already runs single-token steps
+  - for `T = 1`, the retained causal depthwise-conv output depends only on the last kernel tap and the current token
+  - the old code still launched the full `Conv1d` kernel for that case
+- Added `cached_inference_short_conv_mode` to `EngramConfig` with:
+  - `full`: always run the full local-mixing path
+  - `step_kernel`: use the exact last-tap cached-step fast path
+  - `gated_value_only`: experimental cached-step approximation that drops local mixing entirely
+- Added `scripts/profile_cached_engram_decode.py` to compare:
+  - cached vs no-cache decode throughput
+  - exact-vs-approximate cached-step modes
+  - cached generation parity and logit drift against the full mode
+- Local validation after the change: `16 passed in 62.27s`.
+- Local CPU component profile on the tiny Engram config (`176,720` params):
+  - `short_conv_seconds`: about `0.001967 s`
+  - `short_conv_step_seconds`: about `0.000049 s`
+  - `full_engram_seconds`: about `0.002380 s`
+  - `full_engram_cached_step_seconds`: about `0.000181 s`
+- Local CPU decode profile on the tiny Engram config:
+  - baseline `full` cached decode: `244.41 tok/s`
+  - exact `step_kernel` cached decode: `1017.88 tok/s`
+  - cached improvement for `step_kernel`: about `+316.46%`
+  - `step_kernel` cached generation parity: exact (`cached_generation_equal = true`, max cached-step logit delta `0.0`)
+  - experimental `gated_value_only` cached decode: `1062.22 tok/s`
+  - cached improvement for `gated_value_only`: about `+332.20%`
+  - `gated_value_only` cached generation parity: not exact (`cached_generation_equal = false`, max cached-step logit delta about `0.197`)
+- Interpretation:
+  - `step_kernel` is the right optimized path so far because it preserves cached behavior exactly while removing most of the cached local-mixing overhead
+  - `gated_value_only` is faster but is now clearly an approximation, not a drop-in optimized path
 
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.

@@ -36,6 +36,7 @@ def build_config(args):
             seed=engram_cfg.seed,
             kernel_size=args.kernel_size,
             use_short_conv=not args.disable_short_conv,
+            cached_inference_short_conv_mode=args.cached_inference_short_conv_mode,
         ),
     }
 
@@ -66,6 +67,11 @@ def main():
     parser.add_argument("--n-head-per-ngram", type=int, default=4)
     parser.add_argument("--kernel-size", type=int, default=2)
     parser.add_argument("--disable-short-conv", action="store_true")
+    parser.add_argument(
+        "--cached-inference-short-conv-mode",
+        choices=["full", "step_kernel", "gated_value_only"],
+        default="step_kernel",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(0)

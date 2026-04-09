@@ -1,3 +1,4 @@
+import math
 import torch
 from transformers import AutoTokenizer
 from engrams_naive import NaiveEngramsModel, generate_text_naive
@@ -7,6 +8,7 @@ from engrams_kv_moe import (
     EngramsModel,
     MultiHeadEmbedding,
     NgramHashMapping,
+    ShortConv,
     engram_cfg,
     generate_text,
 )
@@ -204,6 +206,23 @@ def _load_shared_weights(dst_model, src_model):
     assert not unexpected
     return missing
 
+
+def _small_engrams_cfg(**overrides):
+    cfg = EngramConfig(
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        engram_vocab_size=[17, 19],
+        max_ngram_size=3,
+        n_embed_per_ngram=16,
+        n_head_per_ngram=4,
+        layer_ids=[0],
+        pad_id=engram_cfg.pad_id,
+        seed=0,
+        kernel_size=2,
+    )
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return cfg
+
 def test_naive_and_optimized_forward_match_without_engrams():
     torch.manual_seed(0)
     config = DEFAULT_CONFIG.copy()
@@ -229,17 +248,7 @@ def test_naive_and_optimized_forward_match_without_engrams():
 
 def test_naive_and_optimized_forward_match_with_small_engrams():
     torch.manual_seed(0)
-    small_engrams_cfg = EngramConfig(
-        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-        engram_vocab_size=[17, 19],
-        max_ngram_size=3,
-        n_embed_per_ngram=16,
-        n_head_per_ngram=4,
-        layer_ids=[0],
-        pad_id=engram_cfg.pad_id,
-        seed=0,
-        kernel_size=2,
-    )
+    small_engrams_cfg = _small_engrams_cfg()
     config = DEFAULT_CONFIG.copy()
     config.update({
         "vocab_size": 129280,
@@ -265,6 +274,109 @@ def test_naive_and_optimized_forward_match_with_small_engrams():
     naive_logits = naive(input_ids, use_cache=False, engram_input_ids=input_ids)
 
     assert torch.allclose(optimized_logits, naive_logits, atol=1e-5, rtol=1e-5)
+
+
+def test_short_conv_step_matches_full_conv_for_single_token():
+    torch.manual_seed(0)
+    short_conv = ShortConv(hidden_size=8, kernel_size=3, dilation=2, hc_mult=1)
+    x = torch.randn(2, 1, 1, 8)
+
+    full = short_conv(x)
+    step = short_conv.forward_step(x)
+
+    assert torch.allclose(full, step, atol=1e-6, rtol=1e-6)
+
+
+def test_cached_step_kernel_mode_matches_full_mode():
+    torch.manual_seed(0)
+    full_cfg = DEFAULT_CONFIG.copy()
+    full_cfg.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="full"),
+    })
+    step_cfg = DEFAULT_CONFIG.copy()
+    step_cfg.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="step_kernel"),
+    })
+
+    full_model = EngramsModel(full_cfg)
+    step_model = EngramsModel(step_cfg)
+    _load_shared_weights(step_model, full_model)
+
+    input_ids = torch.randint(0, full_cfg["vocab_size"], (1, 6), dtype=torch.long)
+    full_out = generate_text(full_model, input_ids, max_new_tokens=4, context_size=16, use_cache=True)
+    step_out = generate_text(step_model, input_ids, max_new_tokens=4, context_size=16, use_cache=True)
+
+    assert torch.equal(full_out, step_out)
+
+
+def test_gated_value_only_cached_mode_has_bounded_logit_drift():
+    torch.manual_seed(0)
+    full_cfg = DEFAULT_CONFIG.copy()
+    full_cfg.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="full"),
+    })
+    value_only_cfg = DEFAULT_CONFIG.copy()
+    value_only_cfg.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 1,
+        "layer_ids": [0],
+        "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="gated_value_only"),
+    })
+
+    full_model = EngramsModel(full_cfg)
+    value_only_model = EngramsModel(value_only_cfg)
+    _load_shared_weights(value_only_model, full_model)
+
+    input_ids = torch.randint(0, full_cfg["vocab_size"], (1, 6), dtype=torch.long)
+
+    full_model.reset_cache()
+    value_only_model.reset_cache()
+    with torch.no_grad():
+        _ = full_model(input_ids, use_cache=True, position_offset=0, engram_input_ids=input_ids)
+        _ = value_only_model(input_ids, use_cache=True, position_offset=0, engram_input_ids=input_ids)
+        step_input = input_ids[:, -1:]
+        engram_window = input_ids[:, -full_cfg["engrams_cfg"].max_ngram_size + 1 :]
+        full_logits = full_model(
+            step_input,
+            use_cache=True,
+            position_offset=input_ids.shape[1] - 1,
+            engram_input_ids=engram_window,
+        )
+        value_only_logits = value_only_model(
+            step_input,
+            use_cache=True,
+            position_offset=input_ids.shape[1] - 1,
+            engram_input_ids=engram_window,
+        )
+
+    max_abs_delta = (full_logits - value_only_logits).abs().max().item()
+    assert math.isfinite(max_abs_delta)
+    assert max_abs_delta < 1.0
 
 def test_naive_and_optimized_forward_match_with_mhc():
     torch.manual_seed(0)

@@ -36,6 +36,7 @@ def build_config(args):
             seed=engram_cfg.seed,
             kernel_size=args.kernel_size,
             use_short_conv=not args.disable_short_conv,
+            cached_inference_short_conv_mode=args.cached_inference_short_conv_mode,
         ),
     }
 
@@ -76,6 +77,11 @@ def main():
     parser.add_argument("--n-head-per-ngram", type=int, default=4)
     parser.add_argument("--kernel-size", type=int, default=2)
     parser.add_argument("--disable-short-conv", action="store_true")
+    parser.add_argument(
+        "--cached-inference-short-conv-mode",
+        choices=["full", "step_kernel", "gated_value_only"],
+        default="step_kernel",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(0)
@@ -128,8 +134,20 @@ def main():
                 return value
             return engram.short_conv(value.unsqueeze(2))
 
+        def short_conv_step_only():
+            if engram.short_conv is None:
+                return value
+            return engram.short_conv.forward_step(value[:, :1].unsqueeze(2))
+
         def full_engram():
             return engram(hidden_states, input_ids)
+
+        def full_engram_cached_step():
+            return engram(
+                hidden_states[:, :1],
+                input_ids[:, -engram.engram_cfg.max_ngram_size + 1 :],
+                use_cache=True,
+            )
 
         results = {
             "model_size_params": sum(p.numel() for p in model.parameters()),
@@ -137,7 +155,9 @@ def main():
             "embedding_seconds": timed(embedding_only, device, args.trials),
             "proj_gate_seconds": timed(proj_gate_only, device, args.trials),
             "short_conv_seconds": timed(short_conv_only, device, args.trials),
+            "short_conv_step_seconds": timed(short_conv_step_only, device, args.trials),
             "full_engram_seconds": timed(full_engram, device, args.trials),
+            "full_engram_cached_step_seconds": timed(full_engram_cached_step, device, args.trials),
         }
 
     print(json.dumps(results, indent=2, sort_keys=True))

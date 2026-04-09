@@ -32,6 +32,7 @@ class EngramConfig:
     seed: int = 0
     kernel_size: int = 4
     use_short_conv: bool = True
+    cached_inference_short_conv_mode: str = "step_kernel"
     
 engram_cfg = EngramConfig()
 
@@ -174,6 +175,39 @@ class ShortConv(nn.Module):
         y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
         
         return y
+
+    def forward_step(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Exact fast path for a single decode-time token.
+
+        When T == 1, the retained causal output only depends on the last
+        convolution tap and the current token, so we can avoid launching the
+        full depthwise convolution kernel.
+        """
+        B, T, G, C = x.shape
+        if T != 1:
+            raise ValueError("forward_step expects a single-token input")
+        if G != self.hc_mult:
+            raise ValueError(f"Input groups {G} != hc_mult {self.hc_mult}")
+
+        if G == 1:
+            chunk = self.norms[0](x[:, :, 0, :])
+            tap = self.conv.weight[:, 0, -1].view(1, 1, C)
+            y = chunk * tap
+            if self.activation:
+                y = self.act_fn(y)
+            return y.unsqueeze(2).contiguous()
+
+        normed_chunks = []
+        for i in range(G):
+            normed_chunks.append(self.norms[i](x[:, :, i, :]))
+
+        x_norm = torch.cat(normed_chunks, dim=-1)
+        tap = self.conv.weight[:, 0, -1].view(1, 1, G * C)
+        y = x_norm * tap
+        if self.activation:
+            y = self.act_fn(y)
+        return y.view(B, T, G, C).contiguous()
     
 def find_next_prime(start, seen_primes):
     candidate = start + 1
@@ -569,7 +603,7 @@ class Engram(nn.Module):
         self.key_norm = nn.RMSNorm(self.model_dim)
         self.query_norm = nn.RMSNorm(self.model_dim)
     
-    def forward(self, hidden_states, input_ids, precomputed_hashes=None):
+    def forward(self, hidden_states, input_ids, precomputed_hashes=None, use_cache=False):
         """
         hidden_states: [B, L, D]
         input_ids: [B, L]
@@ -609,7 +643,23 @@ class Engram(nn.Module):
         if self.short_conv is None:
             return value
 
-        output = value.unsqueeze(2) + self.short_conv(value.unsqueeze(2))
+        short_conv_input = value.unsqueeze(2)
+        short_conv_mode = self.engram_cfg.cached_inference_short_conv_mode
+
+        if use_cache and hidden_states.shape[1] == 1 and short_conv_mode != "full":
+            if short_conv_mode == "step_kernel":
+                short_conv_out = self.short_conv.forward_step(short_conv_input)
+            elif short_conv_mode == "gated_value_only":
+                short_conv_out = torch.zeros_like(short_conv_input)
+            else:
+                raise ValueError(
+                    "cached_inference_short_conv_mode must be one of "
+                    "{'full', 'step_kernel', 'gated_value_only'}"
+                )
+        else:
+            short_conv_out = self.short_conv(short_conv_input)
+
+        output = short_conv_input + short_conv_out
         return output.squeeze(2)
     
 class MultiHeadAttention(nn.Module):
@@ -828,6 +878,7 @@ class TransformerBlock(nn.Module):
                     hidden_states=self.norm1(x),
                     input_ids=input_ids,
                     precomputed_hashes=engram_hashes,
+                    use_cache=use_cache,
                 )
 
             x = x + self.attn(self.norm2(x), use_cache)
@@ -842,6 +893,7 @@ class TransformerBlock(nn.Module):
                     hidden_states=self.norm1(agg),
                     input_ids=input_ids,
                     precomputed_hashes=engram_hashes,
+                    use_cache=use_cache,
                 ),
             )
         
