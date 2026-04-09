@@ -140,18 +140,39 @@ Observations:
 Tiny Engram cached-step comparison config:
 - tiny Engram backbone, about `176,720` params
 - one H200 on `gpu003`
-- optimized implementation at commit `c1a309b`
+- optimized implementation at commit `7f87091`
 
 | Candidate mode | Baseline cached tok/s | Candidate cached tok/s | Relative change | Exact parity |
 | --- | ---: | ---: | ---: | --- |
-| `step_kernel` | 327.67 | 1118.50 | +241.35% | yes |
-| `gated_value_only` | 654.82 | 1178.73 | +80.01% | no |
+| `step_kernel` (`float32`, earlier pass) | 327.67 | 1118.50 | +241.35% | yes |
+| `gated_value_only` (`float32`, earlier pass) | 654.82 | 1178.73 | +80.01% | no |
+| `step_kernel` (`float32`, exact buffered path) | 532.88 | 1102.02 | +106.81% | yes |
+| `step_kernel` (`bfloat16`, exact buffered path) | 436.58 | 1047.57 | +139.95% | yes |
 
 Observations:
 - The exact `step_kernel` cached-step path is the current best optimized Engram path.
-- On H200, it improves cached tiny Engram throughput from about `327.67 tok/s` to about `1118.50 tok/s` while preserving cached generation exactly.
+- On H200, it improves cached tiny Engram throughput from about `532.88 tok/s` to about `1102.02 tok/s` in the current exact buffered implementation while preserving candidate cached-vs-no-cache behavior exactly.
 - The approximate `gated_value_only` mode is faster than the original full path too, but it is not exact and should remain experimental.
 - The cached Engram bottleneck is now much more localized: the full depthwise `ShortConv` launch on single-token cached steps was the main problem.
+- The current `bfloat16` path does not yet beat `float32` on this implementation.
+
+### H200 medium Engram cached-step scaling
+
+Medium Engram cached-step comparison config:
+- Engram-enabled model of about `861,752` params
+- `vocab_size=4096`, `emb_dim=256`, `hidden_dim=1024`, `n_heads=8`, `n_layers=6`, `context_length=64`
+- one H200 on `gpu003`
+- optimized implementation at commit `7f87091`
+
+| Dtype | Baseline cached tok/s | Candidate cached tok/s | Relative change | Exact parity |
+| --- | ---: | ---: | ---: | --- |
+| `float32` | 275.34 | 553.94 | +101.18% | yes |
+| `bfloat16` | 244.62 | 531.39 | +117.23% | yes |
+
+Observations:
+- The exact cached-step optimization remains effective at a larger Engram-enabled tier, not just on the tiny benchmark.
+- At this medium local-cluster scale, the optimized cached path roughly doubles throughput relative to the old full cached path.
+- The current implementation still does not show a clear `bfloat16` advantage on H200.
 
 ## Can We Match The Paper's Speed Claims?
 

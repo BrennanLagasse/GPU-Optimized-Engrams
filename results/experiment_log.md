@@ -187,6 +187,36 @@
   - the exact `step_kernel` path fixes the main cached Engram regression on H200 while preserving behavior
   - `gated_value_only` remains an approximation and should stay experimental only
 
+## 2026-04-09 18:01 EDT
+- Implemented two additional cached-decode optimizations locally and pushed them as commit `7f87091`:
+  - preallocated KV-cache buffers in attention instead of repeated `torch.cat`
+  - last-token Engram hashing for cached decode via `hash_last_tensor(...)`
+- Corrected the cached Engram local-mixing path to keep exact normalized history, so the `step_kernel` path now matches the candidate model's no-cache generation instead of only being "close".
+- Local validation after those changes: `18 passed in 69.52s`.
+- Re-ran the H200 cached Engram comparison on `gpu003`.
+- Tiny Engram H200 results (`176,720` params):
+  - `float32` baseline cached `full`: `532.88 tok/s`
+  - `float32` exact `step_kernel`: `1102.02 tok/s`
+  - `float32` cached improvement: about `+106.81%`
+  - `float32` exactness: `candidate_cached_matches_candidate_no_cache = true`
+  - `bfloat16` baseline cached `full`: `436.58 tok/s`
+  - `bfloat16` exact `step_kernel`: `1047.57 tok/s`
+  - `bfloat16` cached improvement: about `+139.95%`
+  - `bfloat16` exactness: `candidate_cached_matches_candidate_no_cache = true`
+- Medium Engram H200 results (`861,752` params):
+  - `float32` baseline cached `full`: `275.34 tok/s`
+  - `float32` exact `step_kernel`: `553.94 tok/s`
+  - `float32` cached improvement: about `+101.18%`
+  - `float32` exactness: `candidate_cached_matches_candidate_no_cache = true`
+  - `bfloat16` baseline cached `full`: `244.62 tok/s`
+  - `bfloat16` exact `step_kernel`: `531.39 tok/s`
+  - `bfloat16` cached improvement: about `+117.23%`
+  - `bfloat16` exactness: `candidate_cached_matches_candidate_no_cache = true`
+- Interpretation:
+  - the exact cached-step Engram path now scales beyond the tiny toy setting
+  - the current `bfloat16` path is not yet outperforming `float32` on this implementation
+  - the most obvious remaining work is to push to larger Engram-enabled tiers and then move to multi-GPU execution
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
