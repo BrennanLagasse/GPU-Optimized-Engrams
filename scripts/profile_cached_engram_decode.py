@@ -25,6 +25,7 @@ def build_config(args, cached_mode):
         "num_experts_per_tok": 0,
         "hc_mult": args.hc_mult,
         "layer_ids": [0],
+        "device_map": args.device_map,
         "engrams_cfg": EngramConfig(
             tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
             engram_vocab_size=args.engram_vocab_size,
@@ -106,6 +107,7 @@ def cached_step_logits(model, prompt):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device-map", type=str, default="")
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--prompt-length", type=int, default=8)
@@ -132,11 +134,19 @@ def main():
     args = parser.parse_args()
 
     torch.manual_seed(0)
-    device = torch.device(args.device)
+    device_map = [entry.strip() for entry in args.device_map.split(",") if entry.strip()]
+    args.device_map = device_map
+    device = torch.device(device_map[0] if device_map else args.device)
     dtype = getattr(torch, args.dtype)
 
-    baseline = EngramsModel(build_config(args, "full")).to(device=device, dtype=dtype)
-    candidate = EngramsModel(build_config(args, args.candidate_mode)).to(device=device, dtype=dtype)
+    baseline = EngramsModel(build_config(args, "full"))
+    candidate = EngramsModel(build_config(args, args.candidate_mode))
+    if device_map:
+        baseline.apply_device_map(dtype=dtype)
+        candidate.apply_device_map(dtype=dtype)
+    else:
+        baseline = baseline.to(device=device, dtype=dtype)
+        candidate = candidate.to(device=device, dtype=dtype)
     copy_shared_weights(candidate, baseline)
 
     input_ids = torch.randint(

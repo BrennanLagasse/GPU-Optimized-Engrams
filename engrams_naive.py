@@ -21,6 +21,7 @@ from engrams_kv_moe import (
     MultiHeadEmbedding,
     ShortConv,
     engram_cfg,
+    normalize_device_map,
 )
 
 
@@ -171,6 +172,9 @@ class NaiveEngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.block_device_map = normalize_device_map(config.get("device_map"), config["n_layers"])
+        self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
+        self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
         self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"])
         self.drop_emb = nn.Dropout(config["drop_rate"])
@@ -179,15 +183,39 @@ class NaiveEngramsModel(nn.Module):
         )
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
+        if self.block_device_map:
+            self.apply_device_map()
+
+    def apply_device_map(self, dtype=None):
+        if not self.block_device_map:
+            return self
+
+        embed_device = torch.device(self.block_device_map[0])
+        head_device = torch.device(self.block_device_map[-1])
+        self.token_embed.to(device=embed_device, dtype=dtype)
+        self.pos_embed.to(device=embed_device, dtype=dtype)
+        self.drop_emb.to(device=embed_device)
+        for block, device_str in zip(self.transformer_blocks, self.block_device_map):
+            block.to(device=torch.device(device_str), dtype=dtype)
+        self.final_norm.to(device=head_device, dtype=dtype)
+        self.out_head.to(device=head_device, dtype=dtype)
+        self.input_device = embed_device
+        self.output_device = head_device
+        return self
 
     def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
         if use_cache:
             raise NotImplementedError("Naive model intentionally does not support KV cache")
+        if self.block_device_map:
+            input_ids = input_ids.to(self.input_device)
+            input_device = self.input_device
+        else:
+            input_device = input_ids.device
         _, seq_len = input_ids.shape
         pos_ids = torch.arange(
             start=position_offset,
             end=position_offset + seq_len,
-            device=input_ids.device,
+            device=input_device,
             dtype=torch.long,
         )
         x = self.drop_emb(self.token_embed(input_ids) + self.pos_embed(pos_ids))
@@ -195,10 +223,19 @@ class NaiveEngramsModel(nn.Module):
             x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
         if engram_input_ids is None:
             engram_input_ids = input_ids
-        for block in self.transformer_blocks:
-            x = block(engram_input_ids, x)
+        for idx, block in enumerate(self.transformer_blocks):
+            if self.block_device_map:
+                block_device = torch.device(self.block_device_map[idx])
+                if x.device != block_device:
+                    x = x.to(block_device)
+                block_input_ids = engram_input_ids.to(block_device) if torch.is_tensor(engram_input_ids) else engram_input_ids
+            else:
+                block_input_ids = engram_input_ids
+            x = block(block_input_ids, x)
         if x.dim() == 4:
             x = x.mean(dim=2)
+        if self.block_device_map and x.device != self.output_device:
+            x = x.to(self.output_device)
         x = self.final_norm(x)
         return self.out_head(x)
 

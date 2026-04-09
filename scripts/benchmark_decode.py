@@ -25,6 +25,7 @@ def build_config(args):
         "num_experts_per_tok": args.num_experts_per_tok if args.num_experts > 0 else 0,
         "hc_mult": args.hc_mult,
         "layer_ids": args.layer_ids,
+        "device_map": args.device_map,
         "engrams_cfg": EngramConfig(
             tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
             engram_vocab_size=args.engram_vocab_size,
@@ -45,6 +46,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--impl", choices=["optimized", "naive"], default="optimized")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device-map", type=str, default="")
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--prompt-length", type=int, default=32)
@@ -75,11 +77,17 @@ def main():
     args = parser.parse_args()
 
     torch.manual_seed(0)
-    device = torch.device(args.device)
+    device_map = [entry.strip() for entry in args.device_map.split(",") if entry.strip()]
+    args.device_map = device_map
+    device = torch.device(device_map[0] if device_map else args.device)
     dtype = getattr(torch, args.dtype)
     config = build_config(args)
     model_cls = EngramsModel if args.impl == "optimized" else NaiveEngramsModel
-    model = model_cls(config).to(device=device, dtype=dtype)
+    model = model_cls(config)
+    if device_map:
+        model.apply_device_map(dtype=dtype)
+    else:
+        model = model.to(device=device, dtype=dtype)
     input_ids = torch.randint(
         0,
         config["vocab_size"],

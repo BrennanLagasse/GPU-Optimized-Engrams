@@ -483,6 +483,43 @@ def test_naive_and_optimized_generation_match_with_mhc():
     assert torch.equal(optimized_out, naive_out)
 
 
+def test_device_map_cpu_smoke_matches_single_device():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 256,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [0, 1],
+        "engrams_cfg": _small_engrams_cfg(layer_ids=[0, 1]),
+    })
+
+    mapped_config = dict(config)
+    mapped_config["device_map"] = ["cpu", "cpu"]
+
+    optimized = EngramsModel(config)
+    optimized_mapped = EngramsModel(mapped_config)
+    _load_shared_weights(optimized_mapped, optimized)
+
+    naive = NaiveEngramsModel(config)
+    naive_mapped = NaiveEngramsModel(mapped_config)
+    _load_shared_weights(naive, optimized)
+    _load_shared_weights(naive_mapped, optimized)
+
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+
+    optimized_logits = optimized(input_ids, use_cache=False, engram_input_ids=input_ids)
+    optimized_mapped_logits = optimized_mapped(input_ids, use_cache=False, engram_input_ids=input_ids)
+    naive_logits = naive(input_ids, use_cache=False, engram_input_ids=input_ids)
+    naive_mapped_logits = naive_mapped(input_ids, use_cache=False, engram_input_ids=input_ids)
+
+    assert torch.allclose(optimized_logits, optimized_mapped_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(naive_logits, naive_mapped_logits, atol=1e-5, rtol=1e-5)
+
+
 
 
 def main():

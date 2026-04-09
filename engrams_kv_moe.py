@@ -36,6 +36,22 @@ class EngramConfig:
     
 engram_cfg = EngramConfig()
 
+
+def normalize_device_map(device_map, n_layers):
+    if not device_map:
+        return None
+    devices = [str(device) for device in device_map]
+    if len(devices) == n_layers:
+        return devices
+    if len(devices) > n_layers:
+        return devices[:n_layers]
+
+    block_device_map = []
+    for layer_idx in range(n_layers):
+        bucket = (layer_idx * len(devices)) // n_layers
+        block_device_map.append(devices[bucket])
+    return block_device_map
+
 class CompressedTokenizer:
     """
     Compressed tokenizer maps tokens with approx. semantically equivalent tokens to the same IDs
@@ -1031,6 +1047,9 @@ class EngramsModel(nn.Module):
         super().__init__()
         self.config = config
         self.engram_layer_ids = set(config["layer_ids"])
+        self.block_device_map = normalize_device_map(config.get("device_map"), config["n_layers"])
+        self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
+        self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
 
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
         self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
@@ -1042,16 +1061,58 @@ class EngramsModel(nn.Module):
         self.num_engram_layers = sum(1 for block in self.transformer_blocks if block.engram is not None)
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
+        if self.block_device_map:
+            self.apply_device_map()
+
+    def apply_device_map(self, dtype=None):
+        if not self.block_device_map:
+            return self
+
+        embed_device = torch.device(self.block_device_map[0])
+        head_device = torch.device(self.block_device_map[-1])
+        self.token_embed.to(device=embed_device, dtype=dtype)
+        self.pos_embed.to(device=embed_device, dtype=dtype)
+        self.drop_emb.to(device=embed_device)
+        for block, device_str in zip(self.transformer_blocks, self.block_device_map):
+            block.to(device=torch.device(device_str), dtype=dtype)
+        self.final_norm.to(device=head_device, dtype=dtype)
+        self.out_head.to(device=head_device, dtype=dtype)
+        self.input_device = embed_device
+        self.output_device = head_device
+        return self
+
+    def _prepare_engram_hashes(self, engram_input_ids, use_cache):
+        if self.num_engram_layers <= 1:
+            return None
+
+        hashes_by_device = {}
+        if not torch.is_tensor(engram_input_ids):
+            return None
+
+        for block, device_str in zip(self.transformer_blocks, self.block_device_map or []):
+            if block.engram is None or device_str in hashes_by_device:
+                continue
+            local_ids = engram_input_ids.to(device_str)
+            if use_cache and local_ids.shape[1] <= block.engram.engram_cfg.max_ngram_size:
+                hashes_by_device[device_str] = block.engram.hash_mapping.hash_last_tensor(local_ids)
+            else:
+                hashes_by_device[device_str] = block.engram.hash_mapping.hash_tensor(local_ids)
+        return hashes_by_device if hashes_by_device else None
 
     
     def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
+        if self.block_device_map:
+            input_device = self.input_device
+            input_ids = input_ids.to(input_device)
+        else:
+            input_device = input_ids.device
 
         # Figure out positional embeddings based on shift
         _, seq_len = input_ids.shape
         pos_ids = torch.arange(
             start=position_offset,
             end=position_offset + seq_len,
-            device=input_ids.device,
+            device=input_device,
             dtype=torch.long,
         )
 
@@ -1066,7 +1127,9 @@ class EngramsModel(nn.Module):
         engram_hashes = None
         if engram_input_ids is None:
             engram_input_ids = input_ids
-        if self.num_engram_layers > 1:
+        if self.block_device_map:
+            engram_hashes = self._prepare_engram_hashes(engram_input_ids, use_cache)
+        elif self.num_engram_layers > 1:
             first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
             if torch.is_tensor(engram_input_ids):
                 if use_cache and input_ids.shape[1] == 1:
@@ -1076,17 +1139,29 @@ class EngramsModel(nn.Module):
             else:
                 engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
-        for block in self.transformer_blocks:
+        for idx, block in enumerate(self.transformer_blocks):
+            if self.block_device_map:
+                block_device = torch.device(self.block_device_map[idx])
+                if x.device != block_device:
+                    x = x.to(block_device)
+                block_input_ids = engram_input_ids.to(block_device) if torch.is_tensor(engram_input_ids) else engram_input_ids
+                local_hashes = engram_hashes.get(str(block_device)) if isinstance(engram_hashes, dict) else None
+            else:
+                block_input_ids = engram_input_ids
+                local_hashes = engram_hashes
+
             x = block(
-                input_ids=engram_input_ids,
+                input_ids=block_input_ids,
                 x=x,
                 use_cache=use_cache,
-                engram_hashes=engram_hashes,
+                engram_hashes=local_hashes,
             )
 
         if x.dim() == 4:
             x = x.mean(dim=2)
 
+        if self.block_device_map and x.device != self.output_device:
+            x = x.to(self.output_device)
         x = self.final_norm(x)
         logits = self.out_head(x)
 
