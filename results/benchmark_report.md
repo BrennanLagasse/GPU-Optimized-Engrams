@@ -174,6 +174,20 @@ Observations:
 - At this medium local-cluster scale, the optimized cached path roughly doubles throughput relative to the old full cached path.
 - The current implementation still does not show a clear `bfloat16` advantage on H200.
 
+## Target-Scale Sizing
+
+Using [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py), rough bf16 target-scale presets were fitted for the proposal target:
+
+| Preset | Approx params | Example backbone | Param GiB / rank (TP=8) | KV cache GiB | Activation GiB | Working-set GiB / rank |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| `target_32b_approx` | 31.97B | `d=6144, h=24576, L=48, heads=48, hc_mult=4` | 7.44 | 4.50 | 2.25 | 8.29 |
+| `target_40b_approx` | 39.98B | `d=6656, h=26624, L=52, heads=52, hc_mult=4` | 9.31 | 5.28 | 2.64 | 10.30 |
+
+Notes:
+- These are approximate inference-time bf16 memory figures for batch size 1 and context length 4096.
+- The working-set estimate excludes communication buffers, fragmentation, allocator overhead, and any training-time states.
+- The key conclusion is that `32B/40B` is now plausibly a sharding problem, not obviously a raw-memory impossibility on `8 x H200`.
+
 ## Can We Match The Paper's Speed Claims?
 
 Not yet demonstrated.
@@ -187,4 +201,5 @@ What is still missing before making a claim against the paper:
 - running substantially larger models than the current local tiers
 - comparing against the paper on something closer to its scale and hardware assumptions
 - improving the optimized Engram path, not just the dense cached path
-- confirming that the observed dense GPU gains persist as scale increases toward the multi-billion-parameter regime
+- confirming that the observed Engram GPU gains persist as scale increases toward the multi-billion-parameter regime
+- implementing actual multi-GPU inference so the `32B/40B` target can be executed at all

@@ -217,6 +217,28 @@
   - the current `bfloat16` path is not yet outperforming `float32` on this implementation
   - the most obvious remaining work is to push to larger Engram-enabled tiers and then move to multi-GPU execution
 
+## 2026-04-09 18:18 EDT
+- Added `scripts/estimate_scale.py` with named presets for:
+  - tiny / medium / large Engram-enabled tiers
+  - rough `32B` and `40B` target-scale Engram configurations
+- Used the estimator to fit rough target-scale backbones that are close to the proposal target:
+  - `target_32b_approx`: about `31.97B` params with `emb_dim=6144`, `hidden_dim=24576`, `n_layers=48`, `n_heads=48`, `hc_mult=4`
+  - `target_40b_approx`: about `39.98B` params with `emb_dim=6656`, `hidden_dim=26624`, `n_layers=52`, `n_heads=52`, `hc_mult=4`
+- Approximate 8-way tensor-parallel bf16 memory for the rough target presets:
+  - `32B`:
+    - parameter bytes per rank: about `7.44 GiB`
+    - KV cache at batch 1 / context 4096: about `4.50 GiB`
+    - activation estimate: about `2.25 GiB`
+    - working-set estimate per rank: about `8.29 GiB` (excluding optimizer / fragmentation / communication buffers)
+  - `40B`:
+    - parameter bytes per rank: about `9.31 GiB`
+    - KV cache at batch 1 / context 4096: about `5.28 GiB`
+    - activation estimate: about `2.64 GiB`
+    - working-set estimate per rank: about `10.30 GiB` (excluding optimizer / fragmentation / communication buffers)
+- Interpretation:
+  - rough memory sizing suggests that a `32B/40B` random-weight inference run is plausible on `8 x H200` hardware if the model is actually sharded
+  - this is now a concrete engineering blocker rather than a memory blocker: the repo still lacks any multi-GPU inference implementation (`torch.distributed`, tensor parallelism, or pipeline parallelism), so a real `40B optimized beats naive` run cannot be executed yet
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
