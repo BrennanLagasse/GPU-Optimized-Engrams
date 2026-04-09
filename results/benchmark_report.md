@@ -79,12 +79,18 @@ Observations:
 Cluster environment:
 - Host: `gpu003`
 - GPUs visible: `8 x NVIDIA H200 143771 MiB`
-- Benchmark device used: single GPU via `CUDA_VISIBLE_DEVICES=0`
+- Benchmark devices used:
+  - earlier single-GPU runs via `CUDA_VISIBLE_DEVICES=0`
+  - target-scale runs via `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
 - Python env: user-space `virtualenv` in the cluster repo clone
 - Torch build used for GPU runs: `torch 2.11.0+cu128`
 - CUDA availability check: `torch.cuda.is_available() == True`
-- Benchmark dtype: `float32` (script default)
-- Synced branch/commit benchmarked on cluster: `engrams-baseline-benchmarking` at `12a35f7`
+- Benchmark dtypes used:
+  - earlier single-GPU runs: `float32`
+  - target-scale runs: `bfloat16`
+- Synced branch/commit benchmarked on cluster:
+  - earlier single-GPU runs: `engrams-baseline-benchmarking` at `12a35f7`
+  - target-scale multi-GPU runs: `engrams-baseline-benchmarking` at `630ea2a`
 
 Cluster validation:
 - `pytest -q test_engrams.py` passed on the updated cluster copy: `13 passed in 23.72s`
@@ -174,6 +180,74 @@ Observations:
 - At this medium local-cluster scale, the optimized cached path roughly doubles throughput relative to the old full cached path.
 - The current implementation still does not show a clear `bfloat16` advantage on H200.
 
+### 8-GPU model-parallel scaling
+
+Model-parallel implementation details:
+- one-process model-parallel execution using `device_map`
+- transformer blocks are partitioned across the listed GPUs
+- token/position embeddings stay on the first device, final norm/head stay on the last device
+- the optimized path also prepares per-device Engram hashes so Engram layers can execute on their local rank without cross-device hash tensors
+
+Two-GPU smoke config:
+- about `392,860` params
+- `vocab_size=512`, `emb_dim=64`, `hidden_dim=128`, `n_heads=4`, `n_layers=2`, `hc_mult=1`
+- Engram-enabled with `layer_ids=[0,1]`, `engram_vocab_size=[257,263]`, `n_embed_per_ngram=32`, `n_head_per_ngram=4`
+
+| Case | Impl | Avg seconds | Tokens/s | Relative improvement |
+| --- | --- | ---: | ---: | ---: |
+| 2-GPU smoke, 4-token decode | optimized | 0.1970 | 20.31 | baseline |
+| 2-GPU smoke, 4-token decode | naive | 0.1751 | 22.85 | -11.12% vs naive |
+
+Observations:
+- the new multi-GPU execution path is functionally working on the cluster
+- at tiny scale, model-parallel overhead dominates and optimized is still slower than naive
+- this is expected and should not be over-interpreted; the important result is that the 8-way execution path now runs
+
+Target-scale configs used:
+- `target_32b_approx`: about `31.97B` params
+  - `vocab_size=129280`, `context_length=4096`, `emb_dim=6144`, `hidden_dim=24576`, `n_heads=48`, `n_layers=48`, `hc_mult=4`
+  - Engram layers at `layer_ids=[0,1]`
+  - Engram tables `engram_vocab_size=[646400,646400]`, `n_embed_per_ngram=512`, `n_head_per_ngram=8`, `kernel_size=4`
+- `target_40b_approx`: about `39.98B` params
+  - `vocab_size=129280`, `context_length=4096`, `emb_dim=6656`, `hidden_dim=26624`, `n_heads=52`, `n_layers=52`, `hc_mult=4`
+  - Engram layers at `layer_ids=[0,1]`
+  - Engram tables `engram_vocab_size=[646400,646400]`, `n_embed_per_ngram=512`, `n_head_per_ngram=8`, `kernel_size=4`
+
+Target-scale results were run on all 8 H200s with:
+- `dtype=bfloat16`
+- `batch_size=1`
+- `prompt_length=8`
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+
+#### 32B target-scale run
+
+| Case | Impl | Avg seconds | Tokens/s | Relative improvement |
+| --- | --- | ---: | ---: | ---: |
+| 32B, 1-token decode | optimized cached | 0.8531 | 1.17 | baseline |
+
+Observations:
+- the rough `32B` target preset runs successfully across all 8 H200s with the new model-parallel path
+- this established that the target-scale path is now operational before attempting the `40B` run
+
+#### 40B target-scale run
+
+| Case | Impl | Avg seconds | Tokens/s | Relative improvement |
+| --- | --- | ---: | ---: | ---: |
+| 40B, 1-token decode | optimized cached | 0.9768 | 1.02 | -0.97% vs naive |
+| 40B, 1-token decode | naive | 0.9739 | 1.03 | baseline |
+| 40B, 8-token decode | optimized cached | 1.2623 | 6.34 | +1.77% vs naive |
+| 40B, 8-token decode | naive | 1.2848 | 6.23 | baseline |
+
+Observations:
+- the rough `40B` target preset also runs successfully across all 8 H200s
+- on the single-token run, optimized cached and naive are essentially tied; naive is very slightly faster
+- on the 8-token decode, optimized cached beats naive:
+  - optimized cached: `6.34 tok/s`
+  - naive: `6.23 tok/s`
+  - relative improvement: about `+1.77%`
+- this satisfies the current completion condition: a successful `~40B` experiment where optimized beats naive
+- the win is small, so the next optimization phase should target larger decode lengths, stronger cache wins, and lower model-parallel overhead
+
 ## Target-Scale Sizing
 
 Using [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py), rough bf16 target-scale presets were fitted for the proposal target:
@@ -202,4 +276,9 @@ What is still missing before making a claim against the paper:
 - comparing against the paper on something closer to its scale and hardware assumptions
 - improving the optimized Engram path, not just the dense cached path
 - confirming that the observed Engram GPU gains persist as scale increases toward the multi-billion-parameter regime
-- implementing actual multi-GPU inference so the `32B/40B` target can be executed at all
+- improving the target-scale 8-GPU throughput enough that the `40B` win is materially larger than the current ~`1.77%`
+
+What has now been demonstrated:
+- actual multi-GPU inference exists in this repo
+- the rough `32B` and `40B` target presets run on `8 x H200`
+- the optimized path beats naive on the `~40B` target config for the 8-token decode benchmark

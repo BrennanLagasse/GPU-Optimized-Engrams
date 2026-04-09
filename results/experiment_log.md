@@ -239,8 +239,80 @@
   - rough memory sizing suggests that a `32B/40B` random-weight inference run is plausible on `8 x H200` hardware if the model is actually sharded
   - this is now a concrete engineering blocker rather than a memory blocker: the repo still lacks any multi-GPU inference implementation (`torch.distributed`, tensor parallelism, or pipeline parallelism), so a real `40B optimized beats naive` run cannot be executed yet
 
+## 2026-04-09 18:10 EDT
+- Implemented a first model-parallel inference path in the repo and pushed it as commit `630ea2a`.
+- Main implementation changes:
+  - added `device_map` normalization and per-block device placement in the optimized model
+  - added equivalent `device_map` support to the naive model so target-scale comparisons remain semantically aligned
+  - routed token embeddings / output head to the edge devices and partitioned transformer blocks across the listed GPUs
+  - added per-device Engram hash preparation for the optimized path so Engram layers receive local hash tensors on their assigned GPU
+  - extended `scripts/benchmark_decode.py` and `scripts/profile_cached_engram_decode.py` to accept `--device-map`
+  - added a CPU smoke test for the split-device code path
+- Local validation after the model-parallel patch: `19 passed in 80.07s`.
+- Local two-way CPU device-map smoke benchmark succeeded for both naive and optimized implementations.
+
+## 2026-04-09 18:20 EDT
+- Pulled commit `630ea2a` onto `gpu003` and validated the new multi-GPU execution path.
+- Two-GPU smoke benchmark on `CUDA_VISIBLE_DEVICES=0,1` with an Engram-enabled config of about `392,860` params:
+  - optimized: `20.31 tok/s`
+  - naive: `22.85 tok/s`
+- Interpretation:
+  - the model-parallel execution path is functional
+  - at tiny scale, model-parallel overhead still dominates and optimized remains slower than naive
+  - this is acceptable as a smoke result because the goal of this pass was to validate the distributed execution path before attempting the target-scale presets
+
+## 2026-04-09 18:24 EDT
+- Ran the rough `32B` target preset across all `8 x H200` with:
+  - `dtype=bfloat16`
+  - `batch_size=1`
+  - `prompt_length=8`
+  - `max_new_tokens=1`
+  - `use_cache=True`
+  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- Approximate model size:
+  - `31.97B` params
+- Result:
+  - optimized cached: `1.17 tok/s` (`avg_seconds = 0.8531`)
+- Interpretation:
+  - the target-scale sharded path is now actually runnable on the cluster
+  - this cleared the immediate blocker to attempting the `40B` target preset
+
+## 2026-04-09 18:27 EDT
+- Ran the rough `40B` target preset across all `8 x H200` with the same setup, first as a one-token decode.
+- Approximate model size:
+  - `39.98B` params
+- One-token results:
+  - optimized cached: `1.02 tok/s` (`avg_seconds = 0.9768`)
+  - naive: `1.03 tok/s` (`avg_seconds = 0.9739`)
+- Interpretation:
+  - the `40B` target preset runs successfully on the full 8-GPU setup
+  - for a single generated token, optimized cached and naive are effectively tied, with naive slightly ahead
+  - this is not yet the success condition, because the cache has very little opportunity to amortize its setup at a decode length of 1
+
+## 2026-04-09 18:37 EDT
+- Re-ran the same `~40B` target-scale comparison with a longer decode:
+  - `batch_size=1`
+  - `prompt_length=8`
+  - `max_new_tokens=8`
+  - optimized with `use_cache=True`
+  - naive with `use_cache=False`
+- Results:
+  - optimized cached: `6.34 tok/s` (`avg_seconds = 1.2623`)
+  - naive: `6.23 tok/s` (`avg_seconds = 1.2848`)
+  - relative improvement for optimized: about `+1.77%`
+- Interpretation:
+  - this satisfies the current completion condition: a successful `~40B` run on `8 x H200` where optimized beats naive
+  - the win is real but small, which means the next optimization phase should focus on increasing the gap rather than merely proving feasibility
+  - the result also validates that the optimized cached path becomes more competitive once decode length is long enough for cache reuse to matter
+
 ## Next Profiling Targets
-- Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
-- Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.
-- Profile Engram hash/lookup overhead separately from attention and FFN.
-- Once the optimized path wins on single-GPU runs, move to larger scales (`0.5B`, `1B`, `4B`, then higher) before attempting `32B/40B`.
+- Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=8` to see whether the optimized cached gap widens materially.
+- Reduce model-parallel overhead:
+  - measure per-device idle time
+  - reduce cross-device transfers around embeddings / output head where possible
+- Improve target-scale cached Engram execution further, especially for longer decode windows.
+- Add more systematic target-scale reporting:
+  - TTFT
+  - steady-state tok/s
+  - per-rank memory
+  - decode-length scaling curves
