@@ -305,8 +305,40 @@
   - the win is real but small, which means the next optimization phase should focus on increasing the gap rather than merely proving feasibility
   - the result also validates that the optimized cached path becomes more competitive once decode length is long enough for cache reuse to matter
 
+## 2026-04-09 23:06 EDT
+- Added `scripts/profile_decode_breakdown.py` and pushed it as commit `e434961`.
+- Purpose:
+  - separate TTFT from steady-state cached decode at target scale
+  - determine whether the current 40B optimized win comes from cache reuse or from lower first-token latency
+- Re-ran the `~40B` target config on all `8 x H200` with `prompt_length=8`, `max_new_tokens=8`, `dtype=bfloat16`.
+- Breakdown results:
+  - optimized cached:
+    - TTFT: `0.9013 s`
+    - steady-state average seconds/token: `0.03967 s`
+    - steady-state throughput: `25.21 tok/s`
+    - end-to-end throughput: `6.79 tok/s`
+  - naive:
+    - TTFT: `0.8975 s`
+    - steady-state average seconds/token: `0.04632 s`
+    - steady-state throughput: `21.59 tok/s`
+    - end-to-end throughput: `6.55 tok/s`
+- Interpretation:
+  - TTFT is effectively the same between the two implementations at 40B
+  - the optimized win comes from a better steady-state decode regime once cache reuse kicks in
+  - steady-state optimized is about `+16.76%` faster than naive on the 40B / 8-token run
+
+## 2026-04-09 23:07 EDT
+- Extended the target-scale throughput comparison to `max_new_tokens=16` on the same `~40B` config.
+- Results:
+  - optimized cached: `10.06 tok/s` (`avg_seconds = 1.5903`)
+  - naive: `9.65 tok/s` (`avg_seconds = 1.6578`)
+  - relative improvement for optimized: about `+4.25%`
+- Interpretation:
+  - the optimized advantage widens as decode length increases
+  - this supports the breakdown result: the repo’s current target-scale gain is a steady-state cached decoding gain rather than a TTFT gain
+
 ## Next Profiling Targets
-- Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=8` to see whether the optimized cached gap widens materially.
+- Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
   - measure per-device idle time
   - reduce cross-device transfers around embeddings / output head where possible

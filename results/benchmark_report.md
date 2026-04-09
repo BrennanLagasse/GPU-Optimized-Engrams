@@ -237,6 +237,8 @@ Observations:
 | 40B, 1-token decode | naive | 0.9739 | 1.03 | baseline |
 | 40B, 8-token decode | optimized cached | 1.2623 | 6.34 | +1.77% vs naive |
 | 40B, 8-token decode | naive | 1.2848 | 6.23 | baseline |
+| 40B, 16-token decode | optimized cached | 1.5903 | 10.06 | +4.25% vs naive |
+| 40B, 16-token decode | naive | 1.6578 | 9.65 | baseline |
 
 Observations:
 - the rough `40B` target preset also runs successfully across all 8 H200s
@@ -245,8 +247,32 @@ Observations:
   - optimized cached: `6.34 tok/s`
   - naive: `6.23 tok/s`
   - relative improvement: about `+1.77%`
+- on the 16-token decode, the optimized gap widens:
+  - optimized cached: `10.06 tok/s`
+  - naive: `9.65 tok/s`
+  - relative improvement: about `+4.25%`
 - this satisfies the current completion condition: a successful `~40B` experiment where optimized beats naive
-- the win is small, so the next optimization phase should target larger decode lengths, stronger cache wins, and lower model-parallel overhead
+- the current evidence suggests the win is driven by steady-state cached decoding, not by lower time-to-first-token
+
+#### 40B decode breakdown
+
+Breakdown config:
+- same `~39.98B` target config as above
+- `prompt_length=8`
+- `max_new_tokens=8`
+- optimized run used `use_cache=True`
+
+| Metric | Optimized cached | Naive |
+| --- | ---: | ---: |
+| TTFT seconds | 0.9013 | 0.8975 |
+| Steady-state avg seconds/token | 0.03967 | 0.04632 |
+| Steady-state tokens/s | 25.21 | 21.59 |
+| End-to-end tokens/s | 6.79 | 6.55 |
+
+Observations:
+- TTFT is nearly identical between optimized and naive at this scale
+- the optimized win comes from steady-state decode, where cached optimized runs about `+16.76%` faster than naive (`25.21 tok/s` vs `21.59 tok/s`)
+- this explains why the relative advantage is small at `1` token, measurable at `8` tokens, and larger again at `16` tokens
 
 ## Target-Scale Sizing
 
