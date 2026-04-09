@@ -168,6 +168,25 @@
   - `step_kernel` is the right optimized path so far because it preserves cached behavior exactly while removing most of the cached local-mixing overhead
   - `gated_value_only` is faster but is now clearly an approximation, not a drop-in optimized path
 
+## 2026-04-09 16:31 EDT
+- Pulled commit `c1a309b` onto `gpu003` and reran the cached Engram decode comparison on one H200.
+- Tiny Engram benchmark size remained about `176,720` params.
+- H200 cached decode comparison against the original `full` cached local-mixing path:
+  - baseline cached throughput: `327.67 tok/s`
+  - exact `step_kernel` cached throughput: `1118.50 tok/s`
+  - cached improvement for `step_kernel`: about `+241.35%`
+  - `step_kernel` parity: exact (`cached_generation_equal = true`, max cached-step logit delta `0.0`)
+- H200 approximate cached decode comparison for `gated_value_only`:
+  - baseline cached throughput on that run: `654.82 tok/s`
+  - candidate cached throughput: `1178.73 tok/s`
+  - cached improvement for `gated_value_only`: about `+80.01%`
+  - `gated_value_only` parity: not exact (`cached_generation_equal = false`, max cached-step logit delta about `0.351`)
+- Additional observation:
+  - no-cache candidate throughput also jumped in these profiler runs because the profile script measures end-to-end generation in separate fresh processes, so absolute no-cache numbers should be interpreted less strictly than the cached parity/speed comparison.
+- Interpretation:
+  - the exact `step_kernel` path fixes the main cached Engram regression on H200 while preserving behavior
+  - `gated_value_only` remains an approximation and should stay experimental only
+
 ## Next Profiling Targets
 - Measure the post-fast-path single-H200 benchmark matrix again and compare against the previous GPU results.
 - Profile KV-cache behavior: current cache growth still relies on repeated `torch.cat`.

@@ -135,6 +135,24 @@ Observations:
 - That points to `ShortConv` as a decode-time problem primarily in the cached Engram path, not as the whole explanation for the optimized Engram gap.
 - The next Engram optimization pass should target cached inference structure around local mixing, not just the hash path.
 
+### H200 cached Engram local-mixing modes
+
+Tiny Engram cached-step comparison config:
+- tiny Engram backbone, about `176,720` params
+- one H200 on `gpu003`
+- optimized implementation at commit `c1a309b`
+
+| Candidate mode | Baseline cached tok/s | Candidate cached tok/s | Relative change | Exact parity |
+| --- | ---: | ---: | ---: | --- |
+| `step_kernel` | 327.67 | 1118.50 | +241.35% | yes |
+| `gated_value_only` | 654.82 | 1178.73 | +80.01% | no |
+
+Observations:
+- The exact `step_kernel` cached-step path is the current best optimized Engram path.
+- On H200, it improves cached tiny Engram throughput from about `327.67 tok/s` to about `1118.50 tok/s` while preserving cached generation exactly.
+- The approximate `gated_value_only` mode is faster than the original full path too, but it is not exact and should remain experimental.
+- The cached Engram bottleneck is now much more localized: the full depthwise `ShortConv` launch on single-token cached steps was the main problem.
+
 ## Can We Match The Paper's Speed Claims?
 
 Not yet demonstrated.
