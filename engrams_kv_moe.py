@@ -124,6 +124,9 @@ class ShortConv(nn.Module):
         super().__init__()
         self.hc_mult = hc_mult
         self.activation = activation
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.history_len = (kernel_size - 1) * dilation
         
         total_channels = hidden_size * hc_mult
         self.conv = nn.Conv1d(
@@ -144,6 +147,18 @@ class ShortConv(nn.Module):
         if self.activation:
             self.act_fn = nn.SiLU()
 
+        self.register_buffer("cache_x_norm", None, persistent=False)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, G, C = x.shape
+        if G == 1:
+            return self.norms[0](x[:, :, 0, :]).unsqueeze(2)
+
+        normed_chunks = []
+        for i in range(G):
+            normed_chunks.append(self.norms[i](x[:, :, i, :]))
+        return torch.stack(normed_chunks, dim=2)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input:  (B,L,HC_MULT,D)
@@ -153,19 +168,21 @@ class ShortConv(nn.Module):
         
         assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
 
+        x_norm = self._normalize(x)
+
         if G == 1:
-            chunk = self.norms[0](x[:, :, 0, :])
+            chunk = x_norm[:, :, 0, :]
             y_bct = self.conv(chunk.transpose(1, 2))[..., :T]
             if self.activation:
                 y_bct = self.act_fn(y_bct)
+            if self.history_len > 0:
+                self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
             return y_bct.transpose(1, 2).unsqueeze(2).contiguous()
 
-        normed_chunks = []
-        for i in range(G):
-            chunk = x[:, :, i, :]
-            normed_chunks.append(self.norms[i](chunk))
-        
-        x_norm = torch.cat(normed_chunks, dim=-1)
+        if self.history_len > 0:
+            self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
+
+        x_norm = x_norm.reshape(B, T, G * C)
         x_bct = x_norm.transpose(1, 2)
         y_bct = self.conv(x_bct)
         y_bct = y_bct[..., :T]
@@ -178,11 +195,8 @@ class ShortConv(nn.Module):
 
     def forward_step(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Exact fast path for a single decode-time token.
-
-        When T == 1, the retained causal output only depends on the last
-        convolution tap and the current token, so we can avoid launching the
-        full depthwise convolution kernel.
+        Exact cached-decode path for a single token using buffered normalized
+        history instead of re-running the convolution over the full sequence.
         """
         B, T, G, C = x.shape
         if T != 1:
@@ -190,24 +204,37 @@ class ShortConv(nn.Module):
         if G != self.hc_mult:
             raise ValueError(f"Input groups {G} != hc_mult {self.hc_mult}")
 
-        if G == 1:
-            chunk = self.norms[0](x[:, :, 0, :])
-            tap = self.conv.weight[:, 0, -1].view(1, 1, C)
-            y = chunk * tap
-            if self.activation:
-                y = self.act_fn(y)
-            return y.unsqueeze(2).contiguous()
+        x_norm = self._normalize(x)
+        if self.history_len > 0:
+            if (
+                self.cache_x_norm is None
+                or self.cache_x_norm.shape[0] != B
+                or self.cache_x_norm.shape[2] != G
+                or self.cache_x_norm.shape[3] != C
+                or self.cache_x_norm.device != x.device
+                or self.cache_x_norm.dtype != x.dtype
+            ):
+                history = torch.zeros(B, self.history_len, G, C, device=x.device, dtype=x.dtype)
+            else:
+                history = self.cache_x_norm
+            seq = torch.cat([history, x_norm], dim=1)
+        else:
+            seq = x_norm
 
-        normed_chunks = []
-        for i in range(G):
-            normed_chunks.append(self.norms[i](x[:, :, i, :]))
-
-        x_norm = torch.cat(normed_chunks, dim=-1)
-        tap = self.conv.weight[:, 0, -1].view(1, 1, G * C)
-        y = x_norm * tap
+        seq_flat = seq.reshape(B, seq.shape[1], G * C)
+        y_bct = self.conv(seq_flat.transpose(1, 2))
+        last_index = seq.shape[1] - 1
+        y = y_bct[..., last_index:last_index + 1].transpose(1, 2)
         if self.activation:
             y = self.act_fn(y)
+
+        if self.history_len > 0:
+            self.cache_x_norm = seq[:, -self.history_len :, :, :].detach().clone()
+
         return y.view(B, T, G, C).contiguous()
+
+    def reset_cache(self):
+        self.cache_x_norm = None
     
 def find_next_prime(start, seen_primes):
     candidate = start + 1
@@ -444,6 +471,52 @@ class NgramHashMapping:
 
         return hash_ids_for_all_layers
 
+    def hash_last_tensor(self, input_ids: torch.Tensor):
+        """
+        Compute hashes only for the final token position of a short decode window.
+
+        This is used during cached decode, where the Engram block consumes a
+        single hidden-state step and only needs the hashes for the newest token.
+        """
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.long()
+
+        consts = self._get_torch_constants(input_ids.device)
+        compressed = consts["lookup_table"][input_ids]
+        B, T = compressed.shape
+
+        tail_tokens = []
+        for k in range(self.max_ngram_size):
+            if k < T:
+                tail_tokens.append(compressed[:, T - 1 - k])
+            else:
+                tail_tokens.append(
+                    torch.full(
+                        (B,),
+                        self.pad_id,
+                        device=input_ids.device,
+                        dtype=torch.long,
+                    )
+                )
+
+        hash_ids_for_all_layers = {}
+        for layer_id in self.layer_ids:
+            multipliers = consts["layer_multipliers"][layer_id]
+            all_hashes = []
+            for n in range(2, self.max_ngram_size + 1):
+                n_gram_index = n - 2
+                mix = tail_tokens[0] * multipliers[0]
+                for k in range(1, n):
+                    mix = torch.bitwise_xor(mix, tail_tokens[k] * multipliers[k])
+
+                head_vocab_sizes = consts["vocab_sizes"][layer_id][n_gram_index]
+                for j in range(self.n_head_per_ngram):
+                    all_hashes.append(torch.remainder(mix, head_vocab_sizes[j]))
+
+            hash_ids_for_all_layers[layer_id] = torch.stack(all_hashes, dim=1).unsqueeze(1)
+
+        return hash_ids_for_all_layers
+
 class MultiHeadEmbedding(nn.Module):
     def __init__(self, list_of_N: List[int], D: int):
         super().__init__()
@@ -616,7 +689,10 @@ class Engram(nn.Module):
         # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
         if precomputed_hashes is None:
             if torch.is_tensor(input_ids):
-                hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
+                if use_cache and hidden_states.shape[1] == 1:
+                    hash_values = self.hash_mapping.hash_last_tensor(input_ids)[self.layer_id]
+                else:
+                    hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
             else:
                 hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
         else:
@@ -661,6 +737,10 @@ class Engram(nn.Module):
 
         output = short_conv_input + short_conv_out
         return output.squeeze(2)
+
+    def reset_cache(self):
+        if self.short_conv is not None:
+            self.short_conv.reset_cache()
     
 class MultiHeadAttention(nn.Module):
     def __init__(self, config):
@@ -683,6 +763,41 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
         self.ptr_current_pos = 0
+        self.cache_capacity = config["context_length"]
+
+    def _ensure_cache_capacity(self, keys_new, values_new):
+        batch_size, num_tokens, _, _ = keys_new.shape
+        required = self.ptr_current_pos + num_tokens
+        capacity = max(self.cache_capacity, required)
+
+        needs_realloc = (
+            self.cache_k is None
+            or self.cache_v is None
+            or self.cache_k.shape[0] != batch_size
+            or self.cache_k.shape[1] < required
+            or self.cache_k.dtype != keys_new.dtype
+            or self.cache_k.device != keys_new.device
+        )
+        if not needs_realloc:
+            return
+
+        new_k = torch.empty(
+            batch_size,
+            capacity,
+            self.num_heads,
+            self.head_dim,
+            device=keys_new.device,
+            dtype=keys_new.dtype,
+        )
+        new_v = torch.empty_like(new_k)
+
+        if self.cache_k is not None and self.ptr_current_pos > 0:
+            prefix = self.ptr_current_pos
+            new_k[:, :prefix] = self.cache_k[:, :prefix]
+            new_v[:, :prefix] = self.cache_v[:, :prefix]
+
+        self.cache_k = new_k
+        self.cache_v = new_v
 
     def forward(self, x, use_cache=False):
         b, num_tokens, _ = x.shape
@@ -698,12 +813,13 @@ class MultiHeadAttention(nn.Module):
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
         if use_cache:
-            if self.cache_k is None:
-                self.cache_k, self.cache_v = keys_new, values_new
-            else:
-                self.cache_k = torch.cat([self.cache_k, keys_new], dim=1)
-                self.cache_v = torch.cat([self.cache_v, values_new], dim=1)
-            keys, values = self.cache_k, self.cache_v
+            self._ensure_cache_capacity(keys_new, values_new)
+            start = self.ptr_current_pos
+            end = start + num_tokens
+            self.cache_k[:, start:end] = keys_new
+            self.cache_v[:, start:end] = values_new
+            keys = self.cache_k[:, :end]
+            values = self.cache_v[:, :end]
         else:
             keys, values = keys_new, values_new
 
@@ -907,6 +1023,8 @@ class TransformerBlock(nn.Module):
 
     def reset_cache(self):
         self.attn.reset_cache()
+        if self.engram is not None:
+            self.engram.reset_cache()
     
 class EngramsModel(nn.Module):
     def __init__(self, config):
@@ -951,7 +1069,10 @@ class EngramsModel(nn.Module):
         if self.num_engram_layers > 1:
             first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
             if torch.is_tensor(engram_input_ids):
-                engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
+                if use_cache and input_ids.shape[1] == 1:
+                    engram_hashes = first_engram.hash_mapping.hash_last_tensor(engram_input_ids)
+                else:
+                    engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
             else:
                 engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
@@ -1014,7 +1135,7 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
 
             for _ in range(1, max_new_tokens):
                 step_input = out[:, current_len - 1:current_len]
-                engram_start = max(0, current_len - model_engrams_cfg.max_ngram_size + 1)
+                engram_start = max(0, current_len - model_engrams_cfg.max_ngram_size)
                 engram_input_ids = out[:, engram_start:current_len]
                 logits = model(
                     step_input,

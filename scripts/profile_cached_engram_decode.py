@@ -176,6 +176,9 @@ def main():
             (candidate_cache["tokens_per_second"] / baseline_cache["tokens_per_second"]) - 1.0
         ) * 100.0,
         "cached_generation_equal": torch.equal(baseline_cache["output"], candidate_cache["output"]),
+        "candidate_cached_matches_candidate_no_cache": torch.equal(
+            candidate_cache["output"], candidate_nocache["output"]
+        ),
         "no_cache_generation_equal": torch.equal(baseline_nocache["output"], candidate_nocache["output"]),
         "cached_step_max_abs_logit_delta": (
             baseline_step_logits - candidate_step_logits

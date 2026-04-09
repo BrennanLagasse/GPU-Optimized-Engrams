@@ -107,6 +107,30 @@ def test_ngram_hash_mapping_shape_and_range():
     assert hashes.dtype.kind == "i"
     assert hashes.min() >= 0
 
+
+def test_ngram_hash_mapping_last_token_matches_full_hash():
+    tokenizer = AutoTokenizer.from_pretrained(
+        engram_cfg.tokenizer_name_or_path,
+        trust_remote_code=True,
+    )
+    input_ids = tokenizer("hello world again", return_tensors="pt").input_ids
+
+    mapping = NgramHashMapping(
+        engram_vocab_size=[17, 19],
+        max_ngram_size=3,
+        n_embed_per_ngram=16,
+        n_head_per_ngram=2,
+        layer_ids=[0],
+        tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+        pad_id=engram_cfg.pad_id,
+        seed=0,
+    )
+
+    full_hashes = mapping.hash_tensor(input_ids)[0][:, -1:, :]
+    last_hashes = mapping.hash_last_tensor(input_ids)[0]
+
+    assert torch.equal(full_hashes, last_hashes)
+
 def test_forward_with_small_engrams_config():
     tokenizer = AutoTokenizer.from_pretrained(
         engram_cfg.tokenizer_name_or_path,
@@ -184,6 +208,29 @@ def test_generate_with_and_without_cache_match():
         "n_heads": 4,
         "n_layers": 2,
         "layer_ids": [],
+    })
+
+    model = EngramsModel(config)
+    input_ids = torch.randint(0, config["vocab_size"], (1, 6), dtype=torch.long)
+
+    no_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=False)
+    with_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=True)
+
+    assert torch.equal(no_cache, with_cache)
+
+
+def test_generate_with_and_without_cache_match_with_two_engram_layers():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 256,
+        "context_length": 32,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "layer_ids": [0, 1],
+        "engrams_cfg": _small_engrams_cfg(layer_ids=[0, 1]),
     })
 
     model = EngramsModel(config)
@@ -287,19 +334,8 @@ def test_short_conv_step_matches_full_conv_for_single_token():
     assert torch.allclose(full, step, atol=1e-6, rtol=1e-6)
 
 
-def test_cached_step_kernel_mode_matches_full_mode():
+def test_cached_step_kernel_mode_matches_no_cache_generation():
     torch.manual_seed(0)
-    full_cfg = DEFAULT_CONFIG.copy()
-    full_cfg.update({
-        "vocab_size": 256,
-        "context_length": 16,
-        "emb_dim": 32,
-        "hidden_dim": 64,
-        "n_heads": 4,
-        "n_layers": 1,
-        "layer_ids": [0],
-        "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="full"),
-    })
     step_cfg = DEFAULT_CONFIG.copy()
     step_cfg.update({
         "vocab_size": 256,
@@ -312,15 +348,12 @@ def test_cached_step_kernel_mode_matches_full_mode():
         "engrams_cfg": _small_engrams_cfg(cached_inference_short_conv_mode="step_kernel"),
     })
 
-    full_model = EngramsModel(full_cfg)
     step_model = EngramsModel(step_cfg)
-    _load_shared_weights(step_model, full_model)
-
-    input_ids = torch.randint(0, full_cfg["vocab_size"], (1, 6), dtype=torch.long)
-    full_out = generate_text(full_model, input_ids, max_new_tokens=4, context_size=16, use_cache=True)
+    input_ids = torch.randint(0, step_cfg["vocab_size"], (1, 6), dtype=torch.long)
+    no_cache_out = generate_text(step_model, input_ids, max_new_tokens=4, context_size=16, use_cache=False)
     step_out = generate_text(step_model, input_ids, max_new_tokens=4, context_size=16, use_cache=True)
 
-    assert torch.equal(full_out, step_out)
+    assert torch.equal(no_cache_out, step_out)
 
 
 def test_gated_value_only_cached_mode_has_bounded_logit_drift():
