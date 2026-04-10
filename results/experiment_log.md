@@ -393,6 +393,23 @@
   - this is consistent with the earlier TTFT/steady-state breakdown: first-token cost is similar, and the optimized path wins once cached steady-state decoding dominates
   - the 64-token 8-GPU result is the strongest current `~40B` evidence: optimized beats naive by about `25.68%`
 
+## 2026-04-10 10:45 EDT
+- Implemented the next local optimization/profiling pass before another cluster run:
+  - added a cached single-token attention fast path that skips causal mask construction when the current query is already at the cache tail
+  - added `scripts/run_target_benchmark_matrix.py` for reproducible placement and decode-length sweeps across naive and optimized implementations
+  - added `scripts/profile_forward_components.py` for synchronization-heavy component timing of embedding, Engram hash prep, block execution, transfers, final head, and argmax
+- Local validation:
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py`: `19 passed in 162.95s`
+  - `python -m py_compile engrams_kv_moe.py scripts/run_target_benchmark_matrix.py scripts/profile_forward_components.py`: passed
+  - explicit optimized cache/no-cache generation parity smoke: `True`
+  - CPU smoke for `scripts/run_target_benchmark_matrix.py` on the tiny Engram preset: passed with `--device-groups cpu`
+  - CPU smoke for `scripts/profile_forward_components.py` on the tiny Engram preset: passed
+- Next cluster step:
+  - push this commit
+  - pull it on `gpu003`
+  - run the placement/decode matrix for `~40B` on 4 and 8 H200s, preferably at 32 and 64 generated tokens first
+  - run the component profiler on a shorter `~40B` decode if the matrix suggests remaining transfer or block-level bottlenecks
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:

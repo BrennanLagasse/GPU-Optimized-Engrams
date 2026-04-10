@@ -851,22 +851,27 @@ class MultiHeadAttention(nn.Module):
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
         device = queries.device
+        skip_causal_mask = False
         if use_cache:
-            q_positions = torch.arange(
-                self.ptr_current_pos,
-                self.ptr_current_pos + num_tokens_Q,
-                device=device,
-                dtype=torch.long,
-            )
+            q_start = self.ptr_current_pos
             self.ptr_current_pos += num_tokens_Q
+            skip_causal_mask = num_tokens_Q == 1 and q_start == num_tokens_K - 1
+            if not skip_causal_mask:
+                q_positions = torch.arange(
+                    q_start,
+                    q_start + num_tokens_Q,
+                    device=device,
+                    dtype=torch.long,
+                )
         else:
             q_positions = torch.arange(num_tokens_Q, device=device, dtype=torch.long)
             self.ptr_current_pos = 0
-        k_positions = torch.arange(num_tokens_K, device=device, dtype=torch.long)
-        mask_bool = q_positions.unsqueeze(-1) < k_positions.unsqueeze(0)
+        if not skip_causal_mask:
+            k_positions = torch.arange(num_tokens_K, device=device, dtype=torch.long)
+            mask_bool = q_positions.unsqueeze(-1) < k_positions.unsqueeze(0)
 
-        # Use the mask to fill attention scores
-        attn_scores.masked_fill_(mask_bool, -torch.inf)
+            # Use the mask to fill attention scores
+            attn_scores.masked_fill_(mask_bool, -torch.inf)
 
         attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
         attn_weights = self.dropout(attn_weights)
