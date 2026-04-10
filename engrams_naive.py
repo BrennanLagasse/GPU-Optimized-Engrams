@@ -228,9 +228,13 @@ class NaiveEngramsModel(nn.Module):
                 block_device = torch.device(self.block_device_map[idx])
                 if x.device != block_device:
                     x = x.to(block_device)
-                block_input_ids = engram_input_ids.to(block_device) if torch.is_tensor(engram_input_ids) else engram_input_ids
+                block_input_ids = (
+                    engram_input_ids.to(block_device)
+                    if block.engram is not None and torch.is_tensor(engram_input_ids)
+                    else engram_input_ids if block.engram is not None else None
+                )
             else:
-                block_input_ids = engram_input_ids
+                block_input_ids = engram_input_ids if block.engram is not None else None
             x = block(block_input_ids, x)
         if x.dim() == 4:
             x = x.mean(dim=2)
