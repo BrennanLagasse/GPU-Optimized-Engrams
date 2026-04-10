@@ -337,11 +337,36 @@
   - the optimized advantage widens as decode length increases
   - this supports the breakdown result: the repo’s current target-scale gain is a steady-state cached decoding gain rather than a TTFT gain
 
+## 2026-04-10 03:15 EDT
+- Implemented a small model-parallel transfer cleanup and pushed it as commit `dd45e97`:
+  - the optimized and naive model-parallel paths now move `engram_input_ids` to a block's device only when that block actually has an Engram layer
+  - this avoids redundant token-ID transfers on non-Engram blocks
+- Local validation after the change: `19 passed in 104.92s`.
+- Attempted to rerun the 8-GPU `~40B` / 16-token optimized benchmark after the cleanup.
+- External cluster blocker:
+  - GPUs 0-3 were occupied by long-running `sglang::scheduler` processes under the shared `yale` account
+  - GPU 0 had about `135 GiB` already allocated by that process group
+  - I did not kill those processes because the cluster is shared and they may belong to another classmate
+- Fallback experiment:
+  - ran the same `~40B` / 16-token benchmark on the currently free GPUs 4-7 using `CUDA_VISIBLE_DEVICES=4,5,6,7`
+  - because `CUDA_VISIBLE_DEVICES` remaps logical device IDs, the script used `--device-map cuda:0,cuda:1,cuda:2,cuda:3`
+- 4-GPU results:
+  - optimized cached: `13.51 tok/s` (`avg_seconds = 1.1840`)
+  - naive: `12.29 tok/s` (`avg_seconds = 1.3027`)
+  - optimized improvement: about `+9.93%`
+- Interpretation:
+  - the 4-GPU placement is faster than the earlier 8-GPU placement for the same approximate 40B model and decode length
+  - the likely reason is that the current one-process block-sharded implementation pays cross-device activation-transfer overhead at every device boundary
+  - when the 40B model fits on 4 H200s, fewer device boundaries can beat using all 8 GPUs
+  - this is a useful optimization direction: choose the smallest feasible GPU count for inference, or reduce cross-device activation transfer with a better parallelism strategy
+- Attempted to continue to a 32-token 4-GPU benchmark, but the browser terminal session became unstable before the command could focus the terminal input.
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
   - measure per-device idle time
   - reduce cross-device transfers around embeddings / output head where possible
+- Compare 4-GPU vs 8-GPU placement systematically when the full cluster is free.
 - Improve target-scale cached Engram execution further, especially for longer decode windows.
 - Add more systematic target-scale reporting:
   - TTFT

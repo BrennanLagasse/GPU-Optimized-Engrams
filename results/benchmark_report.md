@@ -239,6 +239,8 @@ Observations:
 | 40B, 8-token decode | naive | 1.2848 | 6.23 | baseline |
 | 40B, 16-token decode | optimized cached | 1.5903 | 10.06 | +4.25% vs naive |
 | 40B, 16-token decode | naive | 1.6578 | 9.65 | baseline |
+| 40B, 16-token decode, 4-GPU placement | optimized cached | 1.1840 | 13.51 | +9.93% vs 4-GPU naive |
+| 40B, 16-token decode, 4-GPU placement | naive | 1.3027 | 12.29 | baseline |
 
 Observations:
 - the rough `40B` target preset also runs successfully across all 8 H200s
@@ -251,8 +253,14 @@ Observations:
   - optimized cached: `10.06 tok/s`
   - naive: `9.65 tok/s`
   - relative improvement: about `+4.25%`
+- a 4-GPU placement on the currently free H200s (`CUDA_VISIBLE_DEVICES=4,5,6,7`) was faster than the original 8-GPU placement:
+  - optimized cached: `13.51 tok/s`
+  - naive: `12.29 tok/s`
+  - relative improvement: about `+9.93%`
 - this satisfies the current completion condition: a successful `~40B` experiment where optimized beats naive
 - the current evidence suggests the win is driven by steady-state cached decoding, not by lower time-to-first-token
+- the 4-GPU placement result suggests that cross-device transfer overhead is a major bottleneck in the current one-process model-parallel implementation; fewer GPUs can be faster when the model still fits
+- an 8-GPU rerun after commit `dd45e97` was blocked by unrelated `sglang::scheduler` processes occupying GPUs 0-3, so the 4-GPU result is not a direct A/B replacement for the prior 8-GPU number
 
 #### 40B decode breakdown
 
