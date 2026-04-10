@@ -410,6 +410,50 @@
   - run the placement/decode matrix for `~40B` on 4 and 8 H200s, preferably at 32 and 64 generated tokens first
   - run the component profiler on a shorter `~40B` decode if the matrix suggests remaining transfer or block-level bottlenecks
 
+## 2026-04-10 11:06 EDT
+- Ran the new target-scale benchmark matrix on `gpu003` at commit `0199da8`.
+- Matrix config:
+  - `~39.98B` target preset
+  - `dtype=bfloat16`
+  - `batch_size=1`
+  - `prompt_length=8`
+  - `hc_mult=4`
+  - Engram layers at `layer_ids=[0,1]`
+  - 4-GPU placement: `CUDA_VISIBLE_DEVICES=4,5,6,7`
+  - 8-GPU placement: `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+- Matrix results:
+  - 4-GPU, 32-token decode: optimized cached `18.07 tok/s` vs naive `15.41 tok/s`, about `+17.26%`
+  - 4-GPU, 64-token decode: optimized cached `21.87 tok/s` vs naive `17.13 tok/s`, about `+27.67%`
+  - 8-GPU, 32-token decode: optimized cached `16.84 tok/s` vs naive `14.46 tok/s`, about `+16.46%`
+  - 8-GPU, 64-token decode: optimized cached `21.07 tok/s` vs naive `16.51 tok/s`, about `+27.62%`
+- Ran a synchronization-heavy component profile on the 4-GPU optimized cached path with `max_new_tokens=2`.
+- Component profile highlights:
+  - model size: `39,978,501,600` params
+  - total profiled time: about `0.624 s`
+  - block activation transfers: about `0.292 s`, the largest measured bucket
+  - block 0 with Engram work: about `0.125 s`
+  - next heaviest plain blocks were around `0.028 s`
+- Interpretation:
+  - the cached single-token attention-mask skip appears beneficial at scale: the 8-GPU 64-token run improved from `20.85 tok/s` to `21.07 tok/s`, and the 4-GPU 64-token run improved from `21.87 tok/s` vs the prior 16-token baseline
+  - the component profile reinforces that cross-device activation movement is now the main target-scale bottleneck for this one-process model-parallel implementation
+  - the next safe implementation tweak is to make explicit tensor transfers non-blocking in both optimized and naive paths, then rerun the 64-token placement comparison
+
+## 2026-04-10 11:12 EDT
+- Implemented explicit non-blocking tensor moves for model-parallel data movement:
+  - input token movement to the first model device
+  - Engram input/hash movement to block devices
+  - hidden-state movement between block-device partitions
+  - final hidden-state movement to the output-head device
+- Applied the transfer primitive to both optimized and naive implementations so benchmark comparisons remain fair.
+- Updated `scripts/profile_forward_components.py` to measure the same transfer primitive used by the implementation.
+- Local validation:
+  - `python -m py_compile engrams_kv_moe.py engrams_naive.py scripts/profile_forward_components.py scripts/run_target_benchmark_matrix.py`: passed
+  - CPU profiler smoke: passed
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py`: `19 passed in 207.67s`
+- Next cluster step:
+  - push the non-blocking transfer commit
+  - rerun at least the `~40B` 64-token 4-GPU and 8-GPU comparison
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:

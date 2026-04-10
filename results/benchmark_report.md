@@ -246,6 +246,14 @@ Observations:
 | 40B, 32-token decode | naive | 2.2130 | 14.46 | baseline |
 | 40B, 64-token decode | optimized cached | 3.0694 | 20.85 | +25.68% vs naive |
 | 40B, 64-token decode | naive | 3.8571 | 16.59 | baseline |
+| 40B, 32-token decode, 4-GPU matrix | optimized cached | 1.7709 | 18.07 | +17.26% vs 4-GPU naive |
+| 40B, 32-token decode, 4-GPU matrix | naive | 2.0766 | 15.41 | baseline |
+| 40B, 64-token decode, 4-GPU matrix | optimized cached | 2.9264 | 21.87 | +27.67% vs 4-GPU naive |
+| 40B, 64-token decode, 4-GPU matrix | naive | 3.7350 | 17.13 | baseline |
+| 40B, 32-token decode, 8-GPU matrix | optimized cached | 1.9002 | 16.84 | +16.46% vs 8-GPU naive |
+| 40B, 32-token decode, 8-GPU matrix | naive | 2.2130 | 14.46 | baseline |
+| 40B, 64-token decode, 8-GPU matrix | optimized cached | 3.0375 | 21.07 | +27.62% vs 8-GPU naive |
+| 40B, 64-token decode, 8-GPU matrix | naive | 3.8764 | 16.51 | baseline |
 
 Observations:
 - the rough `40B` target preset also runs successfully across all 8 H200s
@@ -261,6 +269,11 @@ Observations:
 - after the `engram_input_ids` transfer cleanup, longer 8-GPU decode windows show a much clearer cached-path win:
   - 32-token decode: optimized cached `16.67 tok/s` vs naive `14.46 tok/s`, about `+15.28%`
   - 64-token decode: optimized cached `20.85 tok/s` vs naive `16.59 tok/s`, about `+25.68%`
+- after the cached single-token attention-mask fast path, a matrix run on commit `0199da8` showed:
+  - 4-GPU 32-token decode: optimized cached `18.07 tok/s` vs naive `15.41 tok/s`, about `+17.26%`
+  - 4-GPU 64-token decode: optimized cached `21.87 tok/s` vs naive `17.13 tok/s`, about `+27.67%`
+  - 8-GPU 32-token decode: optimized cached `16.84 tok/s` vs naive `14.46 tok/s`, about `+16.46%`
+  - 8-GPU 64-token decode: optimized cached `21.07 tok/s` vs naive `16.51 tok/s`, about `+27.62%`
 - a 4-GPU placement on the currently free H200s (`CUDA_VISIBLE_DEVICES=4,5,6,7`) was faster than the original 8-GPU placement:
   - optimized cached: `13.51 tok/s`
   - naive: `12.29 tok/s`

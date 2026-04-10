@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg
+from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg, move_tensor_to_device
 from engrams_naive import NaiveEngramsModel
 
 
@@ -74,7 +74,7 @@ def profiled_forward(model, input_ids, use_cache, position_offset, engram_input_
     stats = defaultdict(float)
     block_stats = []
     if hasattr(model, "block_device_map") and model.block_device_map:
-        input_ids = timed(stats, "input_id_transfer_seconds", lambda: input_ids.to(model.input_device))
+        input_ids = timed(stats, "input_id_transfer_seconds", lambda: move_tensor_to_device(input_ids, model.input_device))
         input_device = model.input_device
     else:
         input_device = input_ids.device
@@ -130,14 +130,18 @@ def profiled_forward(model, input_ids, use_cache, position_offset, engram_input_
         if model.block_device_map:
             block_device = torch.device(model.block_device_map[idx])
             if x.device != block_device:
-                x = timed(stats, "block_activation_transfer_seconds", lambda block_device=block_device: x.to(block_device))
+                x = timed(
+                    stats,
+                    "block_activation_transfer_seconds",
+                    lambda block_device=block_device: move_tensor_to_device(x, block_device),
+                )
 
         if model.block_device_map:
             block_input_ids = (
                 timed(
                     stats,
                     "engram_id_transfer_seconds",
-                    lambda block_device=block_device: engram_input_ids.to(block_device),
+                    lambda block_device=block_device: move_tensor_to_device(engram_input_ids, block_device),
                 )
                 if block.engram is not None and torch.is_tensor(engram_input_ids)
                 else engram_input_ids if block.engram is not None else None
@@ -177,7 +181,7 @@ def profiled_forward(model, input_ids, use_cache, position_offset, engram_input_
     if x.dim() == 4:
         x = timed(stats, "hc_reduce_seconds", lambda: x.mean(dim=2))
     if model.block_device_map and x.device != model.output_device:
-        x = timed(stats, "output_activation_transfer_seconds", lambda: x.to(model.output_device))
+        x = timed(stats, "output_activation_transfer_seconds", lambda: move_tensor_to_device(x, model.output_device))
     x = timed(stats, "final_norm_seconds", lambda: model.final_norm(x))
     logits = timed(stats, "out_head_seconds", lambda: model.out_head(x))
     stats["total_profiled_seconds"] = sum(value for key, value in stats.items() if key != "total_profiled_seconds")

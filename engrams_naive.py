@@ -21,6 +21,7 @@ from engrams_kv_moe import (
     MultiHeadEmbedding,
     ShortConv,
     engram_cfg,
+    move_tensor_to_device,
     normalize_device_map,
 )
 
@@ -207,7 +208,7 @@ class NaiveEngramsModel(nn.Module):
         if use_cache:
             raise NotImplementedError("Naive model intentionally does not support KV cache")
         if self.block_device_map:
-            input_ids = input_ids.to(self.input_device)
+            input_ids = move_tensor_to_device(input_ids, self.input_device)
             input_device = self.input_device
         else:
             input_device = input_ids.device
@@ -227,9 +228,9 @@ class NaiveEngramsModel(nn.Module):
             if self.block_device_map:
                 block_device = torch.device(self.block_device_map[idx])
                 if x.device != block_device:
-                    x = x.to(block_device)
+                    x = move_tensor_to_device(x, block_device)
                 block_input_ids = (
-                    engram_input_ids.to(block_device)
+                    move_tensor_to_device(engram_input_ids, block_device)
                     if block.engram is not None and torch.is_tensor(engram_input_ids)
                     else engram_input_ids if block.engram is not None else None
                 )
@@ -239,7 +240,7 @@ class NaiveEngramsModel(nn.Module):
         if x.dim() == 4:
             x = x.mean(dim=2)
         if self.block_device_map and x.device != self.output_device:
-            x = x.to(self.output_device)
+            x = move_tensor_to_device(x, self.output_device)
         x = self.final_norm(x)
         return self.out_head(x)
 

@@ -52,6 +52,10 @@ def normalize_device_map(device_map, n_layers):
         block_device_map.append(devices[bucket])
     return block_device_map
 
+
+def move_tensor_to_device(tensor, device):
+    return tensor.to(device, non_blocking=True)
+
 class CompressedTokenizer:
     """
     Compressed tokenizer maps tokens with approx. semantically equivalent tokens to the same IDs
@@ -1097,7 +1101,7 @@ class EngramsModel(nn.Module):
         for block, device_str in zip(self.transformer_blocks, self.block_device_map or []):
             if block.engram is None or device_str in hashes_by_device:
                 continue
-            local_ids = engram_input_ids.to(device_str)
+            local_ids = move_tensor_to_device(engram_input_ids, device_str)
             if use_cache and local_ids.shape[1] <= block.engram.engram_cfg.max_ngram_size:
                 hashes_by_device[device_str] = block.engram.hash_mapping.hash_last_tensor(local_ids)
             else:
@@ -1108,7 +1112,7 @@ class EngramsModel(nn.Module):
     def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
         if self.block_device_map:
             input_device = self.input_device
-            input_ids = input_ids.to(input_device)
+            input_ids = move_tensor_to_device(input_ids, input_device)
         else:
             input_device = input_ids.device
 
@@ -1148,9 +1152,9 @@ class EngramsModel(nn.Module):
             if self.block_device_map:
                 block_device = torch.device(self.block_device_map[idx])
                 if x.device != block_device:
-                    x = x.to(block_device)
+                    x = move_tensor_to_device(x, block_device)
                 block_input_ids = (
-                    engram_input_ids.to(block_device)
+                    move_tensor_to_device(engram_input_ids, block_device)
                     if block.engram is not None and torch.is_tensor(engram_input_ids)
                     else engram_input_ids if block.engram is not None else None
                 )
@@ -1170,7 +1174,7 @@ class EngramsModel(nn.Module):
             x = x.mean(dim=2)
 
         if self.block_device_map and x.device != self.output_device:
-            x = x.to(self.output_device)
+            x = move_tensor_to_device(x, self.output_device)
         x = self.final_norm(x)
         logits = self.out_head(x)
 
