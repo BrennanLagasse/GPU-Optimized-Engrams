@@ -7,7 +7,7 @@ Pre-norm residual units (to be replaced by mHC in later version)
 
 """
 
-from typing import List
+from typing import List, Optional
 from dataclasses import dataclass, field
 import math
 import argparse
@@ -37,7 +37,54 @@ class EngramConfig:
 engram_cfg = EngramConfig()
 
 
-def normalize_device_map(device_map, n_layers):
+def estimate_block_weights(n_layers, layer_ids=None, hc_mult=1):
+    engram_layers = set(layer_ids or [])
+    weights = []
+    for layer_idx in range(n_layers):
+        weight = 1.0
+        if layer_idx in engram_layers:
+            weight += 1.5
+        if layer_idx == 0 or layer_idx == n_layers - 1:
+            weight += 0.25
+        if hc_mult > 1:
+            weight += 0.10 * (hc_mult - 1)
+        weights.append(weight)
+    return weights
+
+
+def weighted_contiguous_partition(weights, num_buckets):
+    if num_buckets <= 0:
+        return []
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return [(idx * num_buckets) // max(len(weights), 1) for idx in range(len(weights))]
+
+    assignments = []
+    prefix = 0.0
+    for weight in weights:
+        midpoint = prefix + 0.5 * weight
+        bucket = min(int((midpoint * num_buckets) / total_weight), num_buckets - 1)
+        assignments.append(bucket)
+        prefix += weight
+    if assignments:
+        assignments[0] = 0
+        assignments[-1] = num_buckets - 1
+    for idx in range(1, len(assignments)):
+        if assignments[idx] < assignments[idx - 1]:
+            assignments[idx] = assignments[idx - 1]
+    for idx in range(len(assignments) - 2, -1, -1):
+        max_allowed = assignments[idx + 1]
+        if assignments[idx] > max_allowed:
+            assignments[idx] = max_allowed
+    return assignments
+
+
+def normalize_device_map(
+    device_map,
+    n_layers,
+    layer_ids: Optional[List[int]] = None,
+    hc_mult: int = 1,
+):
     if not device_map:
         return None
     devices = [str(device) for device in device_map]
@@ -46,11 +93,9 @@ def normalize_device_map(device_map, n_layers):
     if len(devices) > n_layers:
         return devices[:n_layers]
 
-    block_device_map = []
-    for layer_idx in range(n_layers):
-        bucket = (layer_idx * len(devices)) // n_layers
-        block_device_map.append(devices[bucket])
-    return block_device_map
+    weights = estimate_block_weights(n_layers, layer_ids=layer_ids, hc_mult=hc_mult)
+    buckets = weighted_contiguous_partition(weights, len(devices))
+    return [devices[bucket] for bucket in buckets]
 
 
 def move_tensor_to_device(tensor, device):
@@ -1056,7 +1101,12 @@ class EngramsModel(nn.Module):
         super().__init__()
         self.config = config
         self.engram_layer_ids = set(config["layer_ids"])
-        self.block_device_map = normalize_device_map(config.get("device_map"), config["n_layers"])
+        self.block_device_map = normalize_device_map(
+            config.get("device_map"),
+            config["n_layers"],
+            layer_ids=config.get("layer_ids"),
+            hc_mult=config.get("hc_mult", 1),
+        )
         self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
         self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
 

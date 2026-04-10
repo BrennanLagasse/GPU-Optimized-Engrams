@@ -10,6 +10,7 @@ from engrams_kv_moe import (
     NgramHashMapping,
     ShortConv,
     engram_cfg,
+    normalize_device_map,
     generate_text,
 )
 
@@ -217,6 +218,17 @@ def test_generate_with_and_without_cache_match():
     with_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=True)
 
     assert torch.equal(no_cache, with_cache)
+
+
+def test_weighted_device_map_is_contiguous_and_biases_engram_heavy_front_block():
+    mapped = normalize_device_map(
+        ["cpu:0", "cpu:1"],
+        n_layers=4,
+        layer_ids=[0],
+        hc_mult=4,
+    )
+
+    assert mapped == ["cpu:0", "cpu:1", "cpu:1", "cpu:1"]
 
 
 def test_generate_with_and_without_cache_match_with_two_engram_layers():

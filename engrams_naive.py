@@ -173,7 +173,12 @@ class NaiveEngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.block_device_map = normalize_device_map(config.get("device_map"), config["n_layers"])
+        self.block_device_map = normalize_device_map(
+            config.get("device_map"),
+            config["n_layers"],
+            layer_ids=config.get("layer_ids"),
+            hc_mult=config.get("hc_mult", 1),
+        )
         self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
         self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
