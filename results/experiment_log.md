@@ -361,6 +361,38 @@
   - this is a useful optimization direction: choose the smallest feasible GPU count for inference, or reduce cross-device activation transfer with a better parallelism strategy
 - Attempted to continue to a 32-token 4-GPU benchmark, but the browser terminal session became unstable before the command could focus the terminal input.
 
+## 2026-04-10 10:27 EDT
+- Re-authenticated to the browser-only cluster console via Playwright after the Cloudflare session expired.
+- Operational note:
+  - `keyboard.insertText(...)` did not reliably feed the xterm input
+  - `keyboard.type(..., {delay: 1})` did work
+  - base64-encoding a temporary benchmark shell script and typing a single `python3 -c ... && bash ...` command was reliable enough for long benchmark launches
+- Confirmed cluster state before rerunning:
+  - host: `gpu003`
+  - user: `yale`
+  - GPUs 0-7 were effectively free before launch, with only minimal memory in use
+- The cluster clone fast-forwarded to `89df6fd` before the 32-token run, bringing in the latest transfer-cleanup documentation.
+- Ran the `~40B` target preset across all `8 x H200` with:
+  - `dtype=bfloat16`
+  - `batch_size=1`
+  - `prompt_length=8`
+  - `hc_mult=4`
+  - Engram layers at `layer_ids=[0,1]`
+  - optimized with `use_cache=True`
+  - naive with `use_cache=False`
+- 32-token results:
+  - optimized cached: `16.67 tok/s` (`avg_seconds = 1.9200`)
+  - naive: `14.46 tok/s` (`avg_seconds = 2.2130`)
+  - relative improvement for optimized: about `+15.28%`
+- 64-token results:
+  - optimized cached: `20.85 tok/s` (`avg_seconds = 3.0694`)
+  - naive: `16.59 tok/s` (`avg_seconds = 3.8571`)
+  - relative improvement for optimized: about `+25.68%`
+- Interpretation:
+  - the target-scale optimized cached path now shows a clear and growing win at longer decode lengths
+  - this is consistent with the earlier TTFT/steady-state breakdown: first-token cost is similar, and the optimized path wins once cached steady-state decoding dominates
+  - the 64-token 8-GPU result is the strongest current `~40B` evidence: optimized beats naive by about `25.68%`
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:

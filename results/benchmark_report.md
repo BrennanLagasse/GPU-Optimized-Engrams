@@ -91,6 +91,7 @@ Cluster environment:
 - Synced branch/commit benchmarked on cluster:
   - earlier single-GPU runs: `engrams-baseline-benchmarking` at `12a35f7`
   - target-scale multi-GPU runs: `engrams-baseline-benchmarking` at `630ea2a`
+  - latest 40B transfer-cleanup reruns: `engrams-baseline-benchmarking` at `89df6fd`
 
 Cluster validation:
 - `pytest -q test_engrams.py` passed on the updated cluster copy: `13 passed in 23.72s`
@@ -241,6 +242,10 @@ Observations:
 | 40B, 16-token decode | naive | 1.6578 | 9.65 | baseline |
 | 40B, 16-token decode, 4-GPU placement | optimized cached | 1.1840 | 13.51 | +9.93% vs 4-GPU naive |
 | 40B, 16-token decode, 4-GPU placement | naive | 1.3027 | 12.29 | baseline |
+| 40B, 32-token decode | optimized cached | 1.9200 | 16.67 | +15.28% vs naive |
+| 40B, 32-token decode | naive | 2.2130 | 14.46 | baseline |
+| 40B, 64-token decode | optimized cached | 3.0694 | 20.85 | +25.68% vs naive |
+| 40B, 64-token decode | naive | 3.8571 | 16.59 | baseline |
 
 Observations:
 - the rough `40B` target preset also runs successfully across all 8 H200s
@@ -253,11 +258,14 @@ Observations:
   - optimized cached: `10.06 tok/s`
   - naive: `9.65 tok/s`
   - relative improvement: about `+4.25%`
+- after the `engram_input_ids` transfer cleanup, longer 8-GPU decode windows show a much clearer cached-path win:
+  - 32-token decode: optimized cached `16.67 tok/s` vs naive `14.46 tok/s`, about `+15.28%`
+  - 64-token decode: optimized cached `20.85 tok/s` vs naive `16.59 tok/s`, about `+25.68%`
 - a 4-GPU placement on the currently free H200s (`CUDA_VISIBLE_DEVICES=4,5,6,7`) was faster than the original 8-GPU placement:
   - optimized cached: `13.51 tok/s`
   - naive: `12.29 tok/s`
   - relative improvement: about `+9.93%`
-- this satisfies the current completion condition: a successful `~40B` experiment where optimized beats naive
+- this satisfies the current completion condition: successful `~40B` experiments where optimized beats naive, with the advantage increasing as decode length grows
 - the current evidence suggests the win is driven by steady-state cached decoding, not by lower time-to-first-token
 - the 4-GPU placement result suggests that cross-device transfer overhead is a major bottleneck in the current one-process model-parallel implementation; fewer GPUs can be faster when the model still fits
 - an 8-GPU rerun after commit `dd45e97` was blocked by unrelated `sglang::scheduler` processes occupying GPUs 0-3, so the 4-GPU result is not a direct A/B replacement for the prior 8-GPU number
