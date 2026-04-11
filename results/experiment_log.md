@@ -473,6 +473,23 @@
   - the 8-GPU result stayed essentially flat, which reinforces the earlier profiler result that activation transfer remains the primary scaling bottleneck
   - the next meaningful optimization target is still reducing cross-device movement or choosing the smallest feasible GPU count, not more small cached-attention micro-optimizations
 
+## 2026-04-11 10:48 EDT
+- Implemented stage-aware model-parallel execution and pushed it as commit `564909d`.
+- The optimized and naive forward passes now group contiguous same-device blocks into explicit execution stages and reuse stage-local `engram_input_ids` instead of repeating the transfer/device-check path at every block.
+- Local validation after the refactor:
+  - targeted parity/device-map shard: `10 passed, 11 deselected in 27.09s`
+  - full suite: `21 passed in 79.70s`
+- Cluster rerun attempt on `gpu003`:
+  - the initial 8-GPU/4-GPU matrix attempt failed immediately because GPU 0 was occupied by another live process consuming about `131.73 GiB`
+  - a first fallback to GPUs `4,5,6,7` also failed because GPUs `4,5,6,7` had become occupied by another workload (`~134.5 GiB` on each of `4,5,6,7`)
+  - a live `nvidia-smi` probe then showed GPUs `0,1,2,3` were effectively free while `4,5,6,7` remained occupied
+- Successful fallback benchmark:
+  - 4-GPU, 64-token decode on physical GPUs `0,1,2,3`: optimized cached `21.85 tok/s` vs naive `17.07 tok/s`, about `+28.00%`
+- Interpretation:
+  - the stage-aware execution change did not materially improve absolute optimized throughput relative to the earlier 4-GPU 64-token results (`21.81-21.87 tok/s`)
+  - the 8-GPU case remains unmeasured for this commit because of shared-cluster contention, not because of a code failure intrinsic to the branch
+  - the remaining scale bottleneck is still cross-device activation movement itself, not per-block Python/device bookkeeping around those transfers
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
