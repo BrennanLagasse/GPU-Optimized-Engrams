@@ -274,6 +274,9 @@ Observations:
   - 4-GPU 64-token decode: optimized cached `21.87 tok/s` vs naive `17.13 tok/s`, about `+27.67%`
   - 8-GPU 32-token decode: optimized cached `16.84 tok/s` vs naive `14.46 tok/s`, about `+16.46%`
   - 8-GPU 64-token decode: optimized cached `21.07 tok/s` vs naive `16.51 tok/s`, about `+27.62%`
+- after the weighted model-parallel placement change in commit `aa80013`, a 64-token rerun showed:
+  - 4-GPU 64-token decode: optimized cached `21.81 tok/s` vs naive `16.15 tok/s`, about `+35.05%`
+  - 8-GPU 64-token decode: optimized cached `21.02 tok/s` vs naive `16.47 tok/s`, about `+27.63%`
 - a 4-GPU placement on the currently free H200s (`CUDA_VISIBLE_DEVICES=4,5,6,7`) was faster than the original 8-GPU placement:
   - optimized cached: `13.51 tok/s`
   - naive: `12.29 tok/s`
@@ -281,6 +284,7 @@ Observations:
 - this satisfies the current completion condition: successful `~40B` experiments where optimized beats naive, with the advantage increasing as decode length grows
 - the current evidence suggests the win is driven by steady-state cached decoding, not by lower time-to-first-token
 - the 4-GPU placement result suggests that cross-device transfer overhead is a major bottleneck in the current one-process model-parallel implementation; fewer GPUs can be faster when the model still fits
+- weighted placement did not materially increase absolute optimized throughput at `64` tokens; instead, it mostly improved the 4-GPU relative optimized-vs-naive gap while leaving optimized tok/s roughly flat
 - an 8-GPU rerun after commit `dd45e97` was blocked by unrelated `sglang::scheduler` processes occupying GPUs 0-3, so the 4-GPU result is not a direct A/B replacement for the prior 8-GPU number
 
 #### 40B decode breakdown

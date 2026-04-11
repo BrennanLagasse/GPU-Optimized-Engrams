@@ -454,6 +454,25 @@
   - push the non-blocking transfer commit
   - rerun at least the `~40B` 64-token 4-GPU and 8-GPU comparison
 
+## 2026-04-11 00:55 EDT
+- Implemented weighted contiguous model-parallel placement and pushed it as commit `aa80013`.
+- The placement heuristic now treats the earliest Engram-heavy blocks as more expensive than later plain blocks when assigning contiguous layer ranges to devices.
+- Local validation:
+  - targeted parity/device-map tests: `4 passed`
+  - full suite: `20 passed in 119.97s`
+- Cluster reran the `~39.98B` target preset at `max_new_tokens=64` on `gpu003`:
+  - 4-GPU run on physical devices `4,5,6,7`
+  - 8-GPU run on physical devices `0,1,2,3,4,5,6,7`
+  - `dtype=bfloat16`, `batch_size=1`, `prompt_length=8`, `hc_mult=4`, `layer_ids=[0,1]`
+- Results:
+  - 4-GPU, 64-token decode: optimized cached `21.81 tok/s` vs naive `16.15 tok/s`, about `+35.05%`
+  - 8-GPU, 64-token decode: optimized cached `21.02 tok/s` vs naive `16.47 tok/s`, about `+27.63%`
+- Interpretation:
+  - the weighted placement change did not materially increase absolute optimized throughput relative to the earlier 64-token matrix
+  - it did widen the 4-GPU relative optimized-vs-naive gap, largely because the naive path fell more than the optimized path on that rerun
+  - the 8-GPU result stayed essentially flat, which reinforces the earlier profiler result that activation transfer remains the primary scaling bottleneck
+  - the next meaningful optimization target is still reducing cross-device movement or choosing the smallest feasible GPU count, not more small cached-attention micro-optimizations
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
