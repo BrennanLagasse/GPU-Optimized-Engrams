@@ -3,6 +3,7 @@ import torch
 from transformers import AutoTokenizer
 from engrams_naive import NaiveEngramsModel, generate_text_naive
 from engrams_kv_moe import (
+    build_execution_stages,
     CompressedTokenizer,
     EngramConfig,
     EngramsModel,
@@ -229,6 +230,19 @@ def test_weighted_device_map_is_contiguous_and_biases_engram_heavy_front_block()
     )
 
     assert mapped == ["cpu:0", "cpu:1", "cpu:1", "cpu:1"]
+
+
+def test_execution_stages_group_contiguous_devices_and_engram_usage():
+    stages = build_execution_stages(
+        ["cpu:0", "cpu:0", "cpu:1", "cpu:1", "cpu:2"],
+        engram_layer_ids=[1, 4],
+    )
+
+    assert stages == [
+        {"device": "cpu:0", "start": 0, "end": 2, "has_engram": True},
+        {"device": "cpu:1", "start": 2, "end": 4, "has_engram": False},
+        {"device": "cpu:2", "start": 4, "end": 5, "has_engram": True},
+    ]
 
 
 def test_generate_with_and_without_cache_match_with_two_engram_layers():

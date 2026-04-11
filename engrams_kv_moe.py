@@ -98,6 +98,40 @@ def normalize_device_map(
     return [devices[bucket] for bucket in buckets]
 
 
+def build_execution_stages(block_device_map, engram_layer_ids=None):
+    if not block_device_map:
+        return []
+
+    engram_layer_ids = set(engram_layer_ids or [])
+    stages = []
+    start = 0
+    current_device = block_device_map[0]
+    stage_has_engram = 0 in engram_layer_ids
+
+    for idx in range(1, len(block_device_map)):
+        device_str = block_device_map[idx]
+        if device_str != current_device:
+            stages.append({
+                "device": current_device,
+                "start": start,
+                "end": idx,
+                "has_engram": stage_has_engram,
+            })
+            start = idx
+            current_device = device_str
+            stage_has_engram = idx in engram_layer_ids
+        else:
+            stage_has_engram = stage_has_engram or idx in engram_layer_ids
+
+    stages.append({
+        "device": current_device,
+        "start": start,
+        "end": len(block_device_map),
+        "has_engram": stage_has_engram,
+    })
+    return stages
+
+
 def move_tensor_to_device(tensor, device):
     return tensor.to(device, non_blocking=True)
 
@@ -1107,6 +1141,10 @@ class EngramsModel(nn.Module):
             layer_ids=config.get("layer_ids"),
             hc_mult=config.get("hc_mult", 1),
         )
+        self.execution_stages = build_execution_stages(
+            self.block_device_map,
+            engram_layer_ids=config.get("layer_ids"),
+        )
         self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
         self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
 
@@ -1198,27 +1236,39 @@ class EngramsModel(nn.Module):
             else:
                 engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
-        for idx, block in enumerate(self.transformer_blocks):
-            if self.block_device_map:
-                block_device = torch.device(self.block_device_map[idx])
-                if x.device != block_device:
-                    x = move_tensor_to_device(x, block_device)
-                block_input_ids = (
-                    move_tensor_to_device(engram_input_ids, block_device)
-                    if block.engram is not None and torch.is_tensor(engram_input_ids)
-                    else engram_input_ids if block.engram is not None else None
-                )
-                local_hashes = engram_hashes.get(str(block_device)) if isinstance(engram_hashes, dict) else None
-            else:
-                block_input_ids = engram_input_ids if block.engram is not None else None
-                local_hashes = engram_hashes
+        if self.execution_stages:
+            stage_local_inputs = {}
+            if torch.is_tensor(engram_input_ids):
+                for stage in self.execution_stages:
+                    if stage["has_engram"]:
+                        stage_local_inputs[stage["device"]] = move_tensor_to_device(
+                            engram_input_ids,
+                            stage["device"],
+                        )
 
-            x = block(
-                input_ids=block_input_ids,
-                x=x,
-                use_cache=use_cache,
-                engram_hashes=local_hashes,
-            )
+            for stage in self.execution_stages:
+                stage_device = torch.device(stage["device"])
+                if x.device != stage_device:
+                    x = move_tensor_to_device(x, stage_device)
+                stage_input_ids = stage_local_inputs.get(stage["device"], engram_input_ids)
+                local_hashes = engram_hashes.get(stage["device"]) if isinstance(engram_hashes, dict) else None
+
+                for idx in range(stage["start"], stage["end"]):
+                    block = self.transformer_blocks[idx]
+                    x = block(
+                        input_ids=stage_input_ids if block.engram is not None else None,
+                        x=x,
+                        use_cache=use_cache,
+                        engram_hashes=local_hashes,
+                    )
+        else:
+            for block in self.transformer_blocks:
+                x = block(
+                    input_ids=engram_input_ids if block.engram is not None else None,
+                    x=x,
+                    use_cache=use_cache,
+                    engram_hashes=engram_hashes,
+                )
 
         if x.dim() == 4:
             x = x.mean(dim=2)

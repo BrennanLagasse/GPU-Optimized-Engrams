@@ -20,6 +20,7 @@ from engrams_kv_moe import (
     NgramHashMapping,
     MultiHeadEmbedding,
     ShortConv,
+    build_execution_stages,
     engram_cfg,
     move_tensor_to_device,
     normalize_device_map,
@@ -179,6 +180,10 @@ class NaiveEngramsModel(nn.Module):
             layer_ids=config.get("layer_ids"),
             hc_mult=config.get("hc_mult", 1),
         )
+        self.execution_stages = build_execution_stages(
+            self.block_device_map,
+            engram_layer_ids=config.get("layer_ids"),
+        )
         self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
         self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
@@ -229,19 +234,28 @@ class NaiveEngramsModel(nn.Module):
             x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
         if engram_input_ids is None:
             engram_input_ids = input_ids
-        for idx, block in enumerate(self.transformer_blocks):
-            if self.block_device_map:
-                block_device = torch.device(self.block_device_map[idx])
-                if x.device != block_device:
-                    x = move_tensor_to_device(x, block_device)
-                block_input_ids = (
-                    move_tensor_to_device(engram_input_ids, block_device)
-                    if block.engram is not None and torch.is_tensor(engram_input_ids)
-                    else engram_input_ids if block.engram is not None else None
-                )
-            else:
-                block_input_ids = engram_input_ids if block.engram is not None else None
-            x = block(block_input_ids, x)
+        if self.execution_stages:
+            stage_local_inputs = {}
+            if torch.is_tensor(engram_input_ids):
+                for stage in self.execution_stages:
+                    if stage["has_engram"]:
+                        stage_local_inputs[stage["device"]] = move_tensor_to_device(
+                            engram_input_ids,
+                            stage["device"],
+                        )
+
+            for stage in self.execution_stages:
+                stage_device = torch.device(stage["device"])
+                if x.device != stage_device:
+                    x = move_tensor_to_device(x, stage_device)
+                stage_input_ids = stage_local_inputs.get(stage["device"], engram_input_ids)
+
+                for idx in range(stage["start"], stage["end"]):
+                    block = self.transformer_blocks[idx]
+                    x = block(stage_input_ids if block.engram is not None else None, x)
+        else:
+            for block in self.transformer_blocks:
+                x = block(engram_input_ids if block.engram is not None else None, x)
         if x.dim() == 4:
             x = x.mean(dim=2)
         if self.block_device_map and x.device != self.output_device:
