@@ -72,7 +72,7 @@ def profile_decode(model, config, input_ids, impl, use_cache):
     context_len = config["context_length"]
     step_seconds = []
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for step_idx in range(config["max_new_tokens"]):
             if impl == "optimized" and use_cache:
                 if step_idx == 0:

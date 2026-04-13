@@ -490,6 +490,26 @@
   - the 8-GPU case remains unmeasured for this commit because of shared-cluster contention, not because of a code failure intrinsic to the branch
   - the remaining scale bottleneck is still cross-device activation movement itself, not per-block Python/device bookkeeping around those transfers
 
+## 2026-04-13 11:32 EDT
+- Added a proposal audit and paper-style metrics framing:
+  - [results/proposal_checklist.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/proposal_checklist.md)
+  - [results/paper_metrics_summary.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/paper_metrics_summary.md)
+- Extended [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py) with approximate cached-decode FLOPs/token estimates so target-scale benchmark numbers can be reported with a model-size/compute descriptor rather than tok/s alone.
+- Ran one more safe inference-only optimization round:
+  - replaced `torch.no_grad()` with `torch.inference_mode()` across generation and profiling paths
+  - touched optimized and naive generation plus decode/Engram profiling utilities
+- Validation:
+  - `python -m py_compile ...` for the touched Python files: passed
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py`: `21 passed in 81.04s`
+- Local microbenchmark for the new inference-only change:
+  - config: dense cached decode, `vocab=4096`, `d=256`, `h=1024`, `L=6`, `prompt_length=16`, `max_new_tokens=16`
+  - old-style `no_grad` loop: `401.67 tok/s`
+  - new `inference_mode` path: `448.05 tok/s`
+  - relative improvement: about `+11.55%`
+- Interpretation:
+  - this optimization is safe and worthwhile for inference code paths
+  - it reduces framework/autograd overhead, but it is not expected to solve the target-scale multi-GPU transfer bottleneck identified in earlier H200 profiling
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:

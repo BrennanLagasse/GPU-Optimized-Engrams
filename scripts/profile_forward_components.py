@@ -203,7 +203,7 @@ def profile_decode(args, model, config, input_ids):
     per_step = []
     block_totals = defaultdict(float)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for step_idx in range(args.max_new_tokens):
             if args.impl == "optimized" and args.use_cache:
                 if step_idx == 0:

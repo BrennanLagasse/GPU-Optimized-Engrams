@@ -87,7 +87,7 @@ def copy_shared_weights(dst_model, src_model):
 
 def cached_step_logits(model, prompt):
     model.reset_cache()
-    with torch.no_grad():
+    with torch.inference_mode():
         _ = model(
             prompt,
             use_cache=True,
@@ -157,7 +157,7 @@ def main():
         dtype=torch.long,
     )
 
-    with torch.no_grad():
+    with torch.inference_mode():
         baseline_nocache = timed_generation(
             baseline, input_ids, args.max_new_tokens, args.context_length, False, device, args.trials
         )

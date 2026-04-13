@@ -278,7 +278,7 @@ def generate_text_naive(model, input_ids, max_new_tokens, context_size=None):
     out = torch.empty(batch_size, total_len, dtype=input_ids.dtype, device=input_ids.device)
     out[:, :base_len] = input_ids
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for _ in range(max_new_tokens):
             context_start = max(0, current_len - context_len)
             window = out[:, context_start:current_len]

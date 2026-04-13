@@ -107,6 +107,64 @@ def estimate_inference_memory_bytes(cfg, dtype_bytes, batch_size, tensor_paralle
     }
 
 
+def dense_decode_flops_per_layer(emb_dim, hidden_dim, seq_len, use_cache=True):
+    projection_flops = 8 * emb_dim * emb_dim
+    ffn_flops = 6 * emb_dim * hidden_dim
+    if use_cache:
+        attention_flops = 4 * seq_len * emb_dim
+    else:
+        attention_flops = 4 * seq_len * seq_len * emb_dim
+    return projection_flops + ffn_flops + attention_flops
+
+
+def mhc_decode_flops_per_router(width, model_dim, sinkhorn_iters=4):
+    if width <= 1:
+        return 0
+    router_out = width * width + 2 * width
+    router_linear = 2 * model_dim * router_out
+    sinkhorn = 4 * sinkhorn_iters * width * width
+    reductions = 4 * width * model_dim + 2 * width * width * model_dim
+    return router_linear + sinkhorn + reductions
+
+
+def engram_decode_flops_per_layer(cfg):
+    engram_hidden = (cfg["max_ngram_size"] - 1) * cfg["n_embed_per_ngram"]
+    model_dim = cfg["emb_dim"]
+    projection_flops = 4 * engram_hidden * model_dim
+    gating_flops = 6 * model_dim
+    short_conv_flops = 0
+    if cfg["use_short_conv"]:
+        short_conv_flops = 2 * cfg["kernel_size"] * model_dim
+    return projection_flops + gating_flops + short_conv_flops
+
+
+def estimate_decode_flops_per_token(cfg, seq_len, use_cache=True):
+    per_layer_dense = dense_decode_flops_per_layer(
+        emb_dim=cfg["emb_dim"],
+        hidden_dim=cfg["hidden_dim"],
+        seq_len=seq_len,
+        use_cache=use_cache,
+    )
+    router_flops = mhc_decode_flops_per_router(cfg["hc_mult"], cfg["emb_dim"])
+    router_count = 2 * cfg["n_layers"] + len(cfg["layer_ids"])
+    engram_extra = len(cfg["layer_ids"]) * engram_decode_flops_per_layer(cfg)
+    token_embed = 2 * cfg["vocab_size"] * cfg["emb_dim"]
+    output_head = 2 * cfg["emb_dim"] * cfg["vocab_size"]
+    total = (
+        cfg["n_layers"] * per_layer_dense
+        + router_count * router_flops
+        + engram_extra
+        + token_embed
+        + output_head
+    )
+    return {
+        "seq_len": seq_len,
+        "use_cache": use_cache,
+        "forward_flops_per_token_approx": total,
+        "forward_gflops_per_token_approx": total / 1e9,
+    }
+
+
 PRESETS = {
     "tiny_engram": {
         "vocab_size": 512,
@@ -235,6 +293,11 @@ def main():
         "activation_gib_approx": bytes_to_gib(mem["activation_bytes_approx"]),
         "engram_table_gib_approx": bytes_to_gib(mem["engram_table_bytes_approx"]),
         "working_set_per_rank_gib_approx": bytes_to_gib(mem["working_set_per_rank_bytes_approx"]),
+        "cached_decode_flops_per_token_context_64_approx": estimate_decode_flops_per_token(
+            cfg,
+            seq_len=64,
+            use_cache=True,
+        ),
         "tensor_parallel": args.tensor_parallel,
         "dtype_bytes": args.dtype_bytes,
         "batch_size": args.batch_size,

@@ -35,6 +35,7 @@ Observations:
 - On CPU, the optimized implementation remains materially faster than naive as the dense model size grows.
 - The relative win narrows somewhat by the 138.5M-parameter tier, but the optimized path still shows a meaningful throughput advantage.
 - These larger local runs are still far below the proposal’s intended 32B/40B target scale.
+- A later inference-only runtime pass replaced `torch.no_grad()` with `torch.inference_mode()` across generation and profiling utilities; on a local medium dense cached decode microbenchmark (`vocab=4096, d=256, h=1024, L=6`), throughput improved from `401.67 tok/s` to `448.05 tok/s`, about `+11.55%`.
 
 ### Dense decode
 
@@ -324,6 +325,32 @@ Notes:
 - The working-set estimate excludes communication buffers, fragmentation, allocator overhead, and any training-time states.
 - The key conclusion is that `32B/40B` is now plausibly a sharding problem, not obviously a raw-memory impossibility on `8 x H200`.
 
+## Paper-Style Metrics Framing
+
+For the proposal and paper-style discussion, the most useful framing is:
+- approximate model size in parameters
+- approximate bf16 memory footprint per rank
+- approximate cached decode FLOPs per generated token
+- TTFT
+- steady-state cached tok/s
+- end-to-end tok/s
+- percent improvement of optimized vs naive
+
+Representative target-scale metrics:
+
+| Config | Params | Cached decode FLOPs/token (ctx=64, approx) | Hardware | TTFT | Steady-state tok/s | End-to-end tok/s | Optimized improvement |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| `target_40b_approx`, optimized cached | 39.98B | 77.37 GFLOPs | `8 x H200` | 0.9013 s | 25.21 | 6.79 | +16.76% steady-state vs naive |
+| `target_40b_approx`, naive | 39.98B | 77.37 GFLOPs | `8 x H200` | 0.8975 s | 21.59 | 6.55 | baseline |
+| `target_40b_approx`, optimized cached, 64-token best measured throughput | 39.98B | 77.37 GFLOPs | `4 x H200` | n/a | n/a | 21.85 | +28.00% vs naive |
+| `target_40b_approx`, naive, 64-token paired run | 39.98B | 77.37 GFLOPs | `4 x H200` | n/a | n/a | 17.07 | baseline |
+
+Notes:
+- The FLOPs/token values are approximate forward-pass cached-decode estimates from [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py) at context length `64`.
+- These FLOPs/token estimates are intended as scale descriptors, not exact kernel-accounting measurements.
+- They exclude communication overhead, embedding-table memory traffic effects, framework overhead, and host/device stalls, so realized hardware utilization should be interpreted cautiously.
+- The proposal-relevant comparison is therefore best read as: "for a roughly 40B-parameter Engram+mHC model with about 77.37 GFLOPs of cached forward compute per generated token, optimized beats naive and the win shows up primarily in steady-state decode."
+
 ## Can We Match The Paper's Speed Claims?
 
 Not yet demonstrated.
@@ -338,7 +365,7 @@ What is still missing before making a claim against the paper:
 - comparing against the paper on something closer to its scale and hardware assumptions
 - improving the optimized Engram path, not just the dense cached path
 - confirming that the observed Engram GPU gains persist as scale increases toward the multi-billion-parameter regime
-- improving the target-scale 8-GPU throughput enough that the `40B` win is materially larger than the current ~`1.77%`
+- demonstrating cleaner target-scale wins on uncontended multi-GPU hardware with a more communication-efficient parallel strategy than the current one-process sharded baseline
 
 What has now been demonstrated:
 - actual multi-GPU inference exists in this repo

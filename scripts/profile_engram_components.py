@@ -107,7 +107,7 @@ def main():
         dtype=dtype,
     )
 
-    with torch.no_grad():
+    with torch.inference_mode():
         hash_ids = engram.hash_mapping.hash_tensor(input_ids)[engram.layer_id]
         flat_hash_ids = hash_ids[:, -hidden_states.shape[1]:, :]
         embeddings = engram.multi_head_embedding(flat_hash_ids).flatten(start_dim=-2)

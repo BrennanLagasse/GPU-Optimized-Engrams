@@ -1309,7 +1309,7 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
     out = torch.empty(batch_size, total_len, dtype=input_ids.dtype, device=input_ids.device)
     out[:, :base_len] = input_ids
 
-    with torch.no_grad():
+    with torch.inference_mode():
         if use_cache:
             logits = model(
                 input_ids,
