@@ -510,6 +510,22 @@
   - this optimization is safe and worthwhile for inference code paths
   - it reduces framework/autograd overhead, but it is not expected to solve the target-scale multi-GPU transfer bottleneck identified in earlier H200 profiling
 
+## 2026-04-16 00:00 EDT
+- Added [scripts/sweep_cluster_placements.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/sweep_cluster_placements.py) for the next performance-focused loop.
+- The sweep script:
+  - probes `nvidia-smi` when available to find GPUs with enough free HBM
+  - builds contiguous candidate GPU groups by default, avoiding an expensive all-combinations sweep unless `--allow-non-contiguous` is passed
+  - runs optimized and naive benchmarks across decode lengths such as `64`, `128`, and `256`
+  - continues past failed/OOM cases by default
+  - writes full JSON results plus a ranked `summary_ranked` table and `best` placement
+- Local validation:
+  - `python -m py_compile scripts/sweep_cluster_placements.py`: passed
+  - CPU smoke with `tiny_engram`, `--device-groups cpu`, and `--decode-lengths 2`: passed
+- Intended cluster command:
+  - `python scripts/sweep_cluster_placements.py --preset target_40b_approx --group-sizes 4 8 --decode-lengths 64 128 256 --dtype bfloat16 --batch-size 1 --prompt-length 8 --trials 1 --min-free-mib 120000 --output results/cluster_placement_sweep_target_40b.json`
+- Interpretation:
+  - this is the highest-signal next benchmark loop because it separates placement/occupancy effects from code changes and optimizes against longer cached decode windows where the optimized path should be strongest
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
