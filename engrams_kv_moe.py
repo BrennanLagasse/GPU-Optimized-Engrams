@@ -7,7 +7,7 @@ Pre-norm residual units (to be replaced by mHC in later version)
 
 """
 
-from typing import List
+from typing import List, Optional
 from dataclasses import dataclass, field
 import math
 import argparse
@@ -16,6 +16,7 @@ from sympy import isprime
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 from tokenizers import normalizers, Regex 
 
@@ -30,8 +31,109 @@ class EngramConfig:
     pad_id: int = 2
     seed: int = 0
     kernel_size: int = 4
+    use_short_conv: bool = True
+    cached_inference_short_conv_mode: str = "step_kernel"
     
 engram_cfg = EngramConfig()
+
+
+def estimate_block_weights(n_layers, layer_ids=None, hc_mult=1):
+    engram_layers = set(layer_ids or [])
+    weights = []
+    for layer_idx in range(n_layers):
+        weight = 1.0
+        if layer_idx in engram_layers:
+            weight += 1.5
+        if layer_idx == 0 or layer_idx == n_layers - 1:
+            weight += 0.25
+        if hc_mult > 1:
+            weight += 0.10 * (hc_mult - 1)
+        weights.append(weight)
+    return weights
+
+
+def weighted_contiguous_partition(weights, num_buckets):
+    if num_buckets <= 0:
+        return []
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return [(idx * num_buckets) // max(len(weights), 1) for idx in range(len(weights))]
+
+    assignments = []
+    prefix = 0.0
+    for weight in weights:
+        midpoint = prefix + 0.5 * weight
+        bucket = min(int((midpoint * num_buckets) / total_weight), num_buckets - 1)
+        assignments.append(bucket)
+        prefix += weight
+    if assignments:
+        assignments[0] = 0
+        assignments[-1] = num_buckets - 1
+    for idx in range(1, len(assignments)):
+        if assignments[idx] < assignments[idx - 1]:
+            assignments[idx] = assignments[idx - 1]
+    for idx in range(len(assignments) - 2, -1, -1):
+        max_allowed = assignments[idx + 1]
+        if assignments[idx] > max_allowed:
+            assignments[idx] = max_allowed
+    return assignments
+
+
+def normalize_device_map(
+    device_map,
+    n_layers,
+    layer_ids: Optional[List[int]] = None,
+    hc_mult: int = 1,
+):
+    if not device_map:
+        return None
+    devices = [str(device) for device in device_map]
+    if len(devices) == n_layers:
+        return devices
+    if len(devices) > n_layers:
+        return devices[:n_layers]
+
+    weights = estimate_block_weights(n_layers, layer_ids=layer_ids, hc_mult=hc_mult)
+    buckets = weighted_contiguous_partition(weights, len(devices))
+    return [devices[bucket] for bucket in buckets]
+
+
+def build_execution_stages(block_device_map, engram_layer_ids=None):
+    if not block_device_map:
+        return []
+
+    engram_layer_ids = set(engram_layer_ids or [])
+    stages = []
+    start = 0
+    current_device = block_device_map[0]
+    stage_has_engram = 0 in engram_layer_ids
+
+    for idx in range(1, len(block_device_map)):
+        device_str = block_device_map[idx]
+        if device_str != current_device:
+            stages.append({
+                "device": current_device,
+                "start": start,
+                "end": idx,
+                "has_engram": stage_has_engram,
+            })
+            start = idx
+            current_device = device_str
+            stage_has_engram = idx in engram_layer_ids
+        else:
+            stage_has_engram = stage_has_engram or idx in engram_layer_ids
+
+    stages.append({
+        "device": current_device,
+        "start": start,
+        "end": len(block_device_map),
+        "has_engram": stage_has_engram,
+    })
+    return stages
+
+
+def move_tensor_to_device(tensor, device):
+    return tensor.to(device, non_blocking=True)
 
 class CompressedTokenizer:
     """
@@ -121,6 +223,9 @@ class ShortConv(nn.Module):
         super().__init__()
         self.hc_mult = hc_mult
         self.activation = activation
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.history_len = (kernel_size - 1) * dilation
         
         total_channels = hidden_size * hc_mult
         self.conv = nn.Conv1d(
@@ -141,6 +246,18 @@ class ShortConv(nn.Module):
         if self.activation:
             self.act_fn = nn.SiLU()
 
+        self.register_buffer("cache_x_norm", None, persistent=False)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, G, C = x.shape
+        if G == 1:
+            return self.norms[0](x[:, :, 0, :]).unsqueeze(2)
+
+        normed_chunks = []
+        for i in range(G):
+            normed_chunks.append(self.norms[i](x[:, :, i, :]))
+        return torch.stack(normed_chunks, dim=2)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input:  (B,L,HC_MULT,D)
@@ -150,12 +267,21 @@ class ShortConv(nn.Module):
         
         assert G == self.hc_mult, f"Input groups {G} != hc_mult {self.hc_mult}"
 
-        normed_chunks = []
-        for i in range(G):
-            chunk = x[:, :, i, :]
-            normed_chunks.append(self.norms[i](chunk))
-        
-        x_norm = torch.cat(normed_chunks, dim=-1)
+        x_norm = self._normalize(x)
+
+        if G == 1:
+            chunk = x_norm[:, :, 0, :]
+            y_bct = self.conv(chunk.transpose(1, 2))[..., :T]
+            if self.activation:
+                y_bct = self.act_fn(y_bct)
+            if self.history_len > 0:
+                self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
+            return y_bct.transpose(1, 2).unsqueeze(2).contiguous()
+
+        if self.history_len > 0:
+            self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
+
+        x_norm = x_norm.reshape(B, T, G * C)
         x_bct = x_norm.transpose(1, 2)
         y_bct = self.conv(x_bct)
         y_bct = y_bct[..., :T]
@@ -165,6 +291,49 @@ class ShortConv(nn.Module):
         y = y_bct.transpose(1, 2).view(B, T, G, C).contiguous()
         
         return y
+
+    def forward_step(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Exact cached-decode path for a single token using buffered normalized
+        history instead of re-running the convolution over the full sequence.
+        """
+        B, T, G, C = x.shape
+        if T != 1:
+            raise ValueError("forward_step expects a single-token input")
+        if G != self.hc_mult:
+            raise ValueError(f"Input groups {G} != hc_mult {self.hc_mult}")
+
+        x_norm = self._normalize(x)
+        if self.history_len > 0:
+            if (
+                self.cache_x_norm is None
+                or self.cache_x_norm.shape[0] != B
+                or self.cache_x_norm.shape[2] != G
+                or self.cache_x_norm.shape[3] != C
+                or self.cache_x_norm.device != x.device
+                or self.cache_x_norm.dtype != x.dtype
+            ):
+                history = torch.zeros(B, self.history_len, G, C, device=x.device, dtype=x.dtype)
+            else:
+                history = self.cache_x_norm
+            seq = torch.cat([history, x_norm], dim=1)
+        else:
+            seq = x_norm
+
+        seq_flat = seq.reshape(B, seq.shape[1], G * C)
+        y_bct = self.conv(seq_flat.transpose(1, 2))
+        last_index = seq.shape[1] - 1
+        y = y_bct[..., last_index:last_index + 1].transpose(1, 2)
+        if self.activation:
+            y = self.act_fn(y)
+
+        if self.history_len > 0:
+            self.cache_x_norm = seq[:, -self.history_len :, :, :].detach().clone()
+
+        return y.view(B, T, G, C).contiguous()
+
+    def reset_cache(self):
+        self.cache_x_norm = None
     
 def find_next_prime(start, seen_primes):
     candidate = start + 1
@@ -230,6 +399,8 @@ class NgramHashMapping:
             self.layer_multipliers[layer_id] = multipliers
 
         self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
+        self.lookup_table_torch = torch.from_numpy(self.compressed_tokenizer.lookup_table.copy()).long()
+        self._torch_cache = {}
 
     def calculate_vocab_size_across_layers(self):
         """ Returns a dictionary indexed by layer id with entries of dim (m-1, h) """
@@ -340,6 +511,111 @@ class NgramHashMapping:
             hash_ids_for_all_layers[layer_id] = self._get_ngram_hashes(input_ids, layer_id=layer_id)
         return hash_ids_for_all_layers
 
+    def _get_torch_constants(self, device):
+        key = str(device)
+        if key not in self._torch_cache:
+            layer_multipliers = {
+                layer_id: torch.tensor(multipliers, device=device, dtype=torch.long)
+                for layer_id, multipliers in self.layer_multipliers.items()
+            }
+            vocab_sizes = {
+                layer_id: [
+                    torch.tensor(head_vocab_sizes, device=device, dtype=torch.long)
+                    for head_vocab_sizes in self.vocab_size_across_layers[layer_id]
+                ]
+                for layer_id in self.layer_ids
+            }
+            self._torch_cache[key] = {
+                "lookup_table": self.lookup_table_torch.to(device=device),
+                "layer_multipliers": layer_multipliers,
+                "vocab_sizes": vocab_sizes,
+            }
+        return self._torch_cache[key]
+
+    def hash_tensor(self, input_ids: torch.Tensor):
+        """
+        Torch-native hash path used by the optimized implementation to avoid
+        CPU/NumPy round-trips during GPU inference.
+        """
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.long()
+
+        consts = self._get_torch_constants(input_ids.device)
+        compressed = consts["lookup_table"][input_ids]
+        B, T = compressed.shape
+
+        base_shifts = []
+        for k in range(self.max_ngram_size):
+            if k == 0:
+                shifted = compressed
+            else:
+                shifted = F.pad(compressed, (k, 0), value=self.pad_id)[:, :T]
+            base_shifts.append(shifted)
+
+        hash_ids_for_all_layers = {}
+        for layer_id in self.layer_ids:
+            multipliers = consts["layer_multipliers"][layer_id]
+            all_hashes = []
+            for n in range(2, self.max_ngram_size + 1):
+                n_gram_index = n - 2
+                mix = base_shifts[0] * multipliers[0]
+                for k in range(1, n):
+                    mix = torch.bitwise_xor(mix, base_shifts[k] * multipliers[k])
+
+                head_vocab_sizes = consts["vocab_sizes"][layer_id][n_gram_index]
+                for j in range(self.n_head_per_ngram):
+                    all_hashes.append(torch.remainder(mix, head_vocab_sizes[j]))
+
+            hash_ids_for_all_layers[layer_id] = torch.stack(all_hashes, dim=2)
+
+        return hash_ids_for_all_layers
+
+    def hash_last_tensor(self, input_ids: torch.Tensor):
+        """
+        Compute hashes only for the final token position of a short decode window.
+
+        This is used during cached decode, where the Engram block consumes a
+        single hidden-state step and only needs the hashes for the newest token.
+        """
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.long()
+
+        consts = self._get_torch_constants(input_ids.device)
+        compressed = consts["lookup_table"][input_ids]
+        B, T = compressed.shape
+
+        tail_tokens = []
+        for k in range(self.max_ngram_size):
+            if k < T:
+                tail_tokens.append(compressed[:, T - 1 - k])
+            else:
+                tail_tokens.append(
+                    torch.full(
+                        (B,),
+                        self.pad_id,
+                        device=input_ids.device,
+                        dtype=torch.long,
+                    )
+                )
+
+        hash_ids_for_all_layers = {}
+        for layer_id in self.layer_ids:
+            multipliers = consts["layer_multipliers"][layer_id]
+            all_hashes = []
+            for n in range(2, self.max_ngram_size + 1):
+                n_gram_index = n - 2
+                mix = tail_tokens[0] * multipliers[0]
+                for k in range(1, n):
+                    mix = torch.bitwise_xor(mix, tail_tokens[k] * multipliers[k])
+
+                head_vocab_sizes = consts["vocab_sizes"][layer_id][n_gram_index]
+                for j in range(self.n_head_per_ngram):
+                    all_hashes.append(torch.remainder(mix, head_vocab_sizes[j]))
+
+            hash_ids_for_all_layers[layer_id] = torch.stack(all_hashes, dim=1).unsqueeze(1)
+
+        return hash_ids_for_all_layers
+
 class MultiHeadEmbedding(nn.Module):
     def __init__(self, list_of_N: List[int], D: int):
         super().__init__()
@@ -378,68 +654,153 @@ class MultiHeadEmbedding(nn.Module):
         output = self.embedding(shifted_input_ids)
         
         return output
+
+class DenseFeedForward(nn.Module):
+    """
+    Dense gated MLP fallback used when MoE is disabled.
+    Mirrors the expert MLP structure so the dense and sparse paths stay aligned.
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.fc1 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+        self.fc2 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+        self.fc3 = nn.Linear(cfg["hidden_dim"], cfg["emb_dim"], bias=False)
+
+    def forward(self, x):
+        return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
+
+class ManifoldConstrainedHyperConnection(nn.Module):
+    """
+    Lightweight mHC-style residual wrapper.
+
+    For each token position, compute:
+        x_{l+1} = H_res x_l + H_post^T f(H_pre x_l)
+    where H_res is projected onto the bistochastic manifold with Sinkhorn
+    normalization and H_pre / H_post are simplex weights.
+    """
+
+    def __init__(self, width: int, model_dim: int, sinkhorn_iters: int = 4):
+        super().__init__()
+        self.width = width
+        self.model_dim = model_dim
+        self.sinkhorn_iters = sinkhorn_iters
+
+        if self.width > 1:
+            self.router = nn.Linear(model_dim, width * width + 2 * width, bias=True)
+            diag_bias = torch.full((width, width), -2.0)
+            diag_bias.fill_diagonal_(2.0)
+            self.register_buffer("residual_bias", diag_bias)
+        else:
+            self.router = None
+            self.register_buffer("residual_bias", torch.ones(1, 1))
+
+    def _sinkhorn_project(self, logits: torch.Tensor) -> torch.Tensor:
+        weights = torch.exp(logits)
+        for _ in range(self.sinkhorn_iters):
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            weights = weights / weights.sum(dim=-2, keepdim=True).clamp_min(1e-6)
+        return weights
+
+    def _compute_mixing_weights(self, x: torch.Tensor):
+        if self.width == 1:
+            shape = x.shape[:2] + (1,)
+            ones = torch.ones(shape, device=x.device, dtype=x.dtype)
+            residual = torch.ones(x.shape[:2] + (1, 1), device=x.device, dtype=x.dtype)
+            return ones, ones, residual
+
+        routing_input = x.mean(dim=2)
+        raw = self.router(routing_input)
+        split = self.width
+        pre_logits = raw[..., :split]
+        post_logits = raw[..., split:2 * split]
+        res_logits = raw[..., 2 * split:].view(*x.shape[:2], self.width, self.width)
+        res_logits = res_logits + self.residual_bias.to(device=x.device, dtype=x.dtype)
+
+        pre = torch.softmax(pre_logits, dim=-1)
+        post = torch.softmax(post_logits, dim=-1)
+        residual = self._sinkhorn_project(res_logits)
+        return pre, post, residual
+
+    def forward(self, x: torch.Tensor, op):
+        squeeze_output = False
+        if x.dim() == 3:
+            x = x.unsqueeze(2)
+            squeeze_output = True
+
+        pre, post, residual = self._compute_mixing_weights(x)
+        aggregated = (x * pre.unsqueeze(-1)).sum(dim=2)
+        op_out = op(aggregated)
+        mixed_residual = torch.einsum("btij,btjd->btid", residual, x)
+        updated = mixed_residual + post.unsqueeze(-1) * op_out.unsqueeze(2)
+
+        if squeeze_output:
+            return updated.squeeze(2)
+        return updated
     
 class Engram(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
 
         self.layer_id = layer_id
-        self.hidden_dim = config["hidden_dim"]
-        self.hc_mult = config["hc_mult"]
+        self.model_dim = config["emb_dim"]
+        self.engram_cfg = config.get("engrams_cfg", engram_cfg)
 
         self.hash_mapping = NgramHashMapping(
-            engram_vocab_size=engram_cfg.engram_vocab_size,
-            max_ngram_size = engram_cfg.max_ngram_size,
-            n_embed_per_ngram = engram_cfg.n_embed_per_ngram,
-            n_head_per_ngram = engram_cfg.n_head_per_ngram,
-            layer_ids = engram_cfg.layer_ids,
-            tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            pad_id = engram_cfg.pad_id,
-            seed = engram_cfg.seed,
+            engram_vocab_size=self.engram_cfg.engram_vocab_size,
+            max_ngram_size=self.engram_cfg.max_ngram_size,
+            n_embed_per_ngram=self.engram_cfg.n_embed_per_ngram,
+            n_head_per_ngram=self.engram_cfg.n_head_per_ngram,
+            layer_ids=self.engram_cfg.layer_ids,
+            tokenizer_name_or_path=self.engram_cfg.tokenizer_name_or_path,
+            pad_id=self.engram_cfg.pad_id,
+            seed=self.engram_cfg.seed,
         )
 
         self.multi_head_embedding = MultiHeadEmbedding(
-            list_of_N = [x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
-            D = engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
+            list_of_N=[x for y in self.hash_mapping.vocab_size_across_layers[self.layer_id] for x in y],
+            D=self.engram_cfg.n_embed_per_ngram // self.engram_cfg.n_head_per_ngram,
         )
 
         self.short_conv = ShortConv(
-            hidden_size = self.hidden_dim,
-            kernel_size = engram_cfg.kernel_size,
-            dilation    = engram_cfg.max_ngram_size,
-            hc_mult     = self.hc_mult,
-        )
+            hidden_size=self.model_dim,
+            kernel_size=self.engram_cfg.kernel_size,
+            dilation=self.engram_cfg.max_ngram_size,
+            hc_mult=1,
+        ) if self.engram_cfg.use_short_conv else None
 
-        engram_hidden_size = (engram_cfg.max_ngram_size-1) * engram_cfg.n_embed_per_ngram
-        self.value_proj = nn.Linear(engram_hidden_size, self.hidden_dim)
-        self.key_projs = nn.ModuleList(
-            [nn.Linear(engram_hidden_size, self.hidden_dim) for _ in range(self.hc_mult)]
-        )
-
-        self.norm1 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
-        self.norm2 = nn.ModuleList([nn.RMSNorm(self.hidden_dim) for _ in range(self.hc_mult)])
+        engram_hidden_size = (self.engram_cfg.max_ngram_size - 1) * self.engram_cfg.n_embed_per_ngram
+        self.value_proj = nn.Linear(engram_hidden_size, self.model_dim)
+        self.key_proj = nn.Linear(engram_hidden_size, self.model_dim)
+        self.key_norm = nn.RMSNorm(self.model_dim)
+        self.query_norm = nn.RMSNorm(self.model_dim)
     
-    def forward(self, hidden_states, input_ids):
+    def forward(self, hidden_states, input_ids, precomputed_hashes=None, use_cache=False):
         """
-        hidden_states: [B, L, HC_MULT, D]
+        hidden_states: [B, L, D]
         input_ids: [B, L]
         """
-
-        # TODO: Currently hidden states is [B, L, D] form, this will cause some dimension issues
-        if len(hidden_states.shape) == 4:
-            pass
-        elif len(hidden_states.shape) == 3:
-            print("Kludge: adding extra dimensions since mHC not used")
-            raise ValueError
-        else:
-            raise ValueError
-
+        if hidden_states.dim() != 3:
+            raise ValueError("Engram expects aggregated hidden states of shape [B, L, D]")
 
         device = hidden_states.device
 
         # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
-        # TODO: There is some recomputation here, seems quite inefficient
-        hash_input_ids = torch.from_numpy(self.hash_mapping.hash(input_ids)[self.layer_id]).to(device)
+        if precomputed_hashes is None:
+            if torch.is_tensor(input_ids):
+                if use_cache and hidden_states.shape[1] == 1:
+                    hash_values = self.hash_mapping.hash_last_tensor(input_ids)[self.layer_id]
+                else:
+                    hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
+            else:
+                hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
+        else:
+            hash_values = precomputed_hashes[self.layer_id]
+
+        if torch.is_tensor(hash_values):
+            hash_input_ids = hash_values[:, -hidden_states.shape[1]:, :].to(device=device, dtype=torch.long)
+        else:
+            hash_input_ids = torch.from_numpy(hash_values[:, -hidden_states.shape[1]:, :]).to(device)
 
         # Retrieve embeddings corresponding with hashes (b, t, (m-1)*h, d)
         embeddings = self.multi_head_embedding(hash_input_ids)
@@ -447,21 +808,38 @@ class Engram(nn.Module):
         # Concatenate all embeddings for n-grams starting at each token (b, t, (m-1)*h*d)
         embeddings = embeddings.flatten(start_dim=-2)
 
-        gates = []
-        for hc_idx in range(self.hc_mult):
-            key = self.key_projs[hc_idx](embeddings)
-            normed_key = self.norm1[hc_idx](key)
-            query = hidden_states[:,:,hc_idx,:]
-            normed_query = self.norm2[hc_idx](query)
-            gate = (normed_key * normed_query).sum(dim=-1) / math.sqrt(self.hidden_dim)
-            gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
-            gate = gate.sigmoid().unsqueeze(-1)
-            gates.append(gate)
-        gates = torch.stack(gates,dim=2)
-        value = gates * self.value_proj(embeddings).unsqueeze(2)
-        output = value + self.short_conv(value)
+        key = self.key_norm(self.key_proj(embeddings))
+        query = self.query_norm(hidden_states)
+        gate = (key * query).sum(dim=-1) / math.sqrt(self.model_dim)
+        gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+        gate = gate.sigmoid().unsqueeze(-1)
 
-        return output 
+        value = gate * self.value_proj(embeddings)
+        if self.short_conv is None:
+            return value
+
+        short_conv_input = value.unsqueeze(2)
+        short_conv_mode = self.engram_cfg.cached_inference_short_conv_mode
+
+        if use_cache and hidden_states.shape[1] == 1 and short_conv_mode != "full":
+            if short_conv_mode == "step_kernel":
+                short_conv_out = self.short_conv.forward_step(short_conv_input)
+            elif short_conv_mode == "gated_value_only":
+                short_conv_out = torch.zeros_like(short_conv_input)
+            else:
+                raise ValueError(
+                    "cached_inference_short_conv_mode must be one of "
+                    "{'full', 'step_kernel', 'gated_value_only'}"
+                )
+        else:
+            short_conv_out = self.short_conv(short_conv_input)
+
+        output = short_conv_input + short_conv_out
+        return output.squeeze(2)
+
+    def reset_cache(self):
+        if self.short_conv is not None:
+            self.short_conv.reset_cache()
     
 class MultiHeadAttention(nn.Module):
     def __init__(self, config):
@@ -484,6 +862,41 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
         self.ptr_current_pos = 0
+        self.cache_capacity = config["context_length"]
+
+    def _ensure_cache_capacity(self, keys_new, values_new):
+        batch_size, num_tokens, _, _ = keys_new.shape
+        required = self.ptr_current_pos + num_tokens
+        capacity = max(self.cache_capacity, required)
+
+        needs_realloc = (
+            self.cache_k is None
+            or self.cache_v is None
+            or self.cache_k.shape[0] != batch_size
+            or self.cache_k.shape[1] < required
+            or self.cache_k.dtype != keys_new.dtype
+            or self.cache_k.device != keys_new.device
+        )
+        if not needs_realloc:
+            return
+
+        new_k = torch.empty(
+            batch_size,
+            capacity,
+            self.num_heads,
+            self.head_dim,
+            device=keys_new.device,
+            dtype=keys_new.dtype,
+        )
+        new_v = torch.empty_like(new_k)
+
+        if self.cache_k is not None and self.ptr_current_pos > 0:
+            prefix = self.ptr_current_pos
+            new_k[:, :prefix] = self.cache_k[:, :prefix]
+            new_v[:, :prefix] = self.cache_v[:, :prefix]
+
+        self.cache_k = new_k
+        self.cache_v = new_v
 
     def forward(self, x, use_cache=False):
         b, num_tokens, _ = x.shape
@@ -499,12 +912,13 @@ class MultiHeadAttention(nn.Module):
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
         if use_cache:
-            if self.cache_k is None:
-                self.cache_k, self.cache_v = keys_new, values_new
-            else:
-                self.cache_k = torch.cat([self.cache_k, keys_new], dim=1)
-                self.cache_v = torch.cat([self.cache_v, values_new], dim=1)
-            keys, values = self.cache_k, self.cache_v
+            self._ensure_cache_capacity(keys_new, values_new)
+            start = self.ptr_current_pos
+            end = start + num_tokens
+            self.cache_k[:, start:end] = keys_new
+            self.cache_v[:, start:end] = values_new
+            keys = self.cache_k[:, :end]
+            values = self.cache_v[:, :end]
         else:
             keys, values = keys_new, values_new
 
@@ -520,22 +934,27 @@ class MultiHeadAttention(nn.Module):
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
         device = queries.device
+        skip_causal_mask = False
         if use_cache:
-            q_positions = torch.arange(
-                self.ptr_current_pos,
-                self.ptr_current_pos + num_tokens_Q,
-                device=device,
-                dtype=torch.long,
-            )
+            q_start = self.ptr_current_pos
             self.ptr_current_pos += num_tokens_Q
+            skip_causal_mask = num_tokens_Q == 1 and q_start == num_tokens_K - 1
+            if not skip_causal_mask:
+                q_positions = torch.arange(
+                    q_start,
+                    q_start + num_tokens_Q,
+                    device=device,
+                    dtype=torch.long,
+                )
         else:
             q_positions = torch.arange(num_tokens_Q, device=device, dtype=torch.long)
             self.ptr_current_pos = 0
-        k_positions = torch.arange(num_tokens_K, device=device, dtype=torch.long)
-        mask_bool = q_positions.unsqueeze(-1) < k_positions.unsqueeze(0)
+        if not skip_causal_mask:
+            k_positions = torch.arange(num_tokens_K, device=device, dtype=torch.long)
+            mask_bool = q_positions.unsqueeze(-1) < k_positions.unsqueeze(0)
 
-        # Use the mask to fill attention scores
-        attn_scores.masked_fill_(mask_bool, -torch.inf)
+            # Use the mask to fill attention scores
+            attn_scores.masked_fill_(mask_bool, -torch.inf)
 
         attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -559,6 +978,11 @@ class MoEFeedForward(nn.Module):
         self.num_experts_per_tok = cfg["num_experts_per_tok"]
         self.num_experts = cfg["num_experts"]
         self.emb_dim = cfg["emb_dim"]
+
+        if self.num_experts <= 0:
+            raise ValueError("MoEFeedForward requires num_experts > 0")
+        if self.num_experts_per_tok <= 0:
+            raise ValueError("MoEFeedForward requires num_experts_per_tok > 0")
 
         self.gate = nn.Linear(cfg["emb_dim"], cfg["num_experts"], bias=False)
         self.fc1 = nn.ModuleList(
@@ -611,14 +1035,12 @@ class MoEFeedForward(nn.Module):
             token_mask = mask.any(dim=-1) # (b*t)
 
             # Get the indices of tokens using the expert
-            select_idx = token_mask.non_zero(as_tuple=False).squeeze(-1) # [b*t]
+            select_idx = token_mask.nonzero(as_tuple=False).squeeze(-1) # [b*t]
 
             # Compute the forward pass for the tokens using the expert
             expert_in = x_flat.index_select(0, select_idx)
-
-            expert_out = self.fc1[expert_id](expert_in) * self.fc2[expert_id](expert_in)
-            expert_out = torch.nn.SilU(expert_out) # SiLU used for MoE
-            expert_out = self.fc3[expert_id](expert_out)
+            expert_hidden = F.silu(self.fc1[expert_id](expert_in)) * self.fc2[expert_id](expert_in)
+            expert_out = self.fc3[expert_id](expert_hidden)
 
             # Determine probability assigned to each head
             mask_selected = mask[select_idx]
@@ -628,7 +1050,7 @@ class MoEFeedForward(nn.Module):
             )
 
             # Compute output as a weighted sum of outputs by probabilities
-            out_flat.index_add_(0, select_idx, expert_out * selected_probs.unsqueeze(-1))
+            out_flat.index_add_(0, select_idx, expert_out * selected_probs)
 
         return out_flat.reshape(batch, seq_len, self.emb_dim)
 
@@ -648,46 +1070,83 @@ class LayerNorm(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
+        self.hc_mult = config["hc_mult"]
         self.attn = MultiHeadAttention(config)
-        self.moe = MoEFeedForward(config)
+        if config["num_experts"] > 0:
+            self.ff = MoEFeedForward(config)
+        else:
+            self.ff = DenseFeedForward(config)
         self.norm1 = LayerNorm(config["emb_dim"])
         self.norm2 = LayerNorm(config["emb_dim"])
         self.norm3 = LayerNorm(config["emb_dim"])
+        self.hc_attn = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        self.hc_ff = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
         self.engram = None
         if layer_id in config["layer_ids"]:
             self.engram = Engram(config=config, layer_id=layer_id)
+            self.hc_engram = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        else:
+            self.hc_engram = None
     
-    def forward(self, input_ids, x, use_cache=False):
+    def forward(self, input_ids, x, use_cache=False, engram_hashes=None):
+        if self.hc_mult == 1:
+            if x.dim() != 3:
+                raise ValueError("Expected [B, L, D] hidden states when hc_mult == 1")
 
-        # Note that all residual units are pre-norm
+            if self.engram is not None:
+                x = x + self.engram(
+                    hidden_states=self.norm1(x),
+                    input_ids=input_ids,
+                    precomputed_hashes=engram_hashes,
+                    use_cache=use_cache,
+                )
 
-        if use_cache:
-            raise NotImplementedError
+            x = x + self.attn(self.norm2(x), use_cache)
+            x = x + self.ff(self.norm3(x))
+            return x
 
         # (Engram Layer Only) Engram + Residual Connection
         if self.engram is not None:
-            shortcut = x
-            x = self.norm1(x)
-            x = self.engram(hidden_states=x, input_ids=input_ids)
-            x = x + shortcut
+            x = self.hc_engram(
+                x,
+                lambda agg: self.engram(
+                    hidden_states=self.norm1(agg),
+                    input_ids=input_ids,
+                    precomputed_hashes=engram_hashes,
+                    use_cache=use_cache,
+                ),
+            )
         
         # Attention + Residual Connection
-        shortcut = x
-        x = self.norm2(x)
-        x = self.attn(x, use_cache) 
-        x = x + shortcut
+        x = self.hc_attn(x, lambda agg: self.attn(self.norm2(agg), use_cache))
 
         # FFN + Residual Connection
-        shortcut = x
-        x = self.norm3(x)
-        x = self.moe(x)
-        x = x + shortcut
+        x = self.hc_ff(x, lambda agg: self.ff(self.norm3(agg)))
 
         return x
+
+    def reset_cache(self):
+        self.attn.reset_cache()
+        if self.engram is not None:
+            self.engram.reset_cache()
     
 class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
+        self.engram_layer_ids = set(config["layer_ids"])
+        self.block_device_map = normalize_device_map(
+            config.get("device_map"),
+            config["n_layers"],
+            layer_ids=config.get("layer_ids"),
+            hc_mult=config.get("hc_mult", 1),
+        )
+        self.execution_stages = build_execution_stages(
+            self.block_device_map,
+            engram_layer_ids=config.get("layer_ids"),
+        )
+        self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
+        self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
 
         self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
         self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
@@ -696,33 +1155,134 @@ class EngramsModel(nn.Module):
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(config, layer_id=id) for id in range(config["n_layers"])]
         )
+        self.num_engram_layers = sum(1 for block in self.transformer_blocks if block.engram is not None)
         self.final_norm = LayerNorm(config["emb_dim"])
         self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
+        if self.block_device_map:
+            self.apply_device_map()
 
-        assert config["hc_mult"] == 1, "Hyper-Connections not yet supported"
+    def apply_device_map(self, dtype=None):
+        if not self.block_device_map:
+            return self
+
+        embed_device = torch.device(self.block_device_map[0])
+        head_device = torch.device(self.block_device_map[-1])
+        self.token_embed.to(device=embed_device, dtype=dtype)
+        self.pos_embed.to(device=embed_device, dtype=dtype)
+        self.drop_emb.to(device=embed_device)
+        for block, device_str in zip(self.transformer_blocks, self.block_device_map):
+            block.to(device=torch.device(device_str), dtype=dtype)
+        self.final_norm.to(device=head_device, dtype=dtype)
+        self.out_head.to(device=head_device, dtype=dtype)
+        self.input_device = embed_device
+        self.output_device = head_device
+        return self
+
+    def _prepare_engram_hashes(self, engram_input_ids, use_cache):
+        if self.num_engram_layers <= 1:
+            return None
+
+        hashes_by_device = {}
+        if not torch.is_tensor(engram_input_ids):
+            return None
+
+        for block, device_str in zip(self.transformer_blocks, self.block_device_map or []):
+            if block.engram is None or device_str in hashes_by_device:
+                continue
+            local_ids = move_tensor_to_device(engram_input_ids, device_str)
+            if use_cache and local_ids.shape[1] <= block.engram.engram_cfg.max_ngram_size:
+                hashes_by_device[device_str] = block.engram.hash_mapping.hash_last_tensor(local_ids)
+            else:
+                hashes_by_device[device_str] = block.engram.hash_mapping.hash_tensor(local_ids)
+        return hashes_by_device if hashes_by_device else None
 
     
-    def forward(self, input_ids, use_cache=False):
+    def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
+        if self.block_device_map:
+            input_device = self.input_device
+            input_ids = move_tensor_to_device(input_ids, input_device)
+        else:
+            input_device = input_ids.device
 
         # Figure out positional embeddings based on shift
         _, seq_len = input_ids.shape
-        if use_cache:
-            raise NotImplementedError
-        else:
-            pos_ids = torch.arange(start=0, end=seq_len, device=input_ids.device, dtype=torch.long)
+        pos_ids = torch.arange(
+            start=position_offset,
+            end=position_offset + seq_len,
+            device=input_device,
+            dtype=torch.long,
+        )
 
         token_embeds = self.token_embed(input_ids)
         pos_embeds = self.pos_embed(pos_ids)
         x = token_embeds + pos_embeds
         x = self.drop_emb(x)
-        
-        for block in self.transformer_blocks:
-            x = block(input_ids=input_ids, x=x, use_cache=use_cache)
 
+        if self.config["hc_mult"] > 1:
+            x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
+
+        engram_hashes = None
+        if engram_input_ids is None:
+            engram_input_ids = input_ids
+        if self.block_device_map:
+            engram_hashes = self._prepare_engram_hashes(engram_input_ids, use_cache)
+        elif self.num_engram_layers > 1:
+            first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
+            if torch.is_tensor(engram_input_ids):
+                if use_cache and input_ids.shape[1] == 1:
+                    engram_hashes = first_engram.hash_mapping.hash_last_tensor(engram_input_ids)
+                else:
+                    engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
+            else:
+                engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
+        
+        if self.execution_stages:
+            stage_local_inputs = {}
+            if torch.is_tensor(engram_input_ids):
+                for stage in self.execution_stages:
+                    if stage["has_engram"]:
+                        stage_local_inputs[stage["device"]] = move_tensor_to_device(
+                            engram_input_ids,
+                            stage["device"],
+                        )
+
+            for stage in self.execution_stages:
+                stage_device = torch.device(stage["device"])
+                if x.device != stage_device:
+                    x = move_tensor_to_device(x, stage_device)
+                stage_input_ids = stage_local_inputs.get(stage["device"], engram_input_ids)
+                local_hashes = engram_hashes.get(stage["device"]) if isinstance(engram_hashes, dict) else None
+
+                for idx in range(stage["start"], stage["end"]):
+                    block = self.transformer_blocks[idx]
+                    x = block(
+                        input_ids=stage_input_ids if block.engram is not None else None,
+                        x=x,
+                        use_cache=use_cache,
+                        engram_hashes=local_hashes,
+                    )
+        else:
+            for block in self.transformer_blocks:
+                x = block(
+                    input_ids=engram_input_ids if block.engram is not None else None,
+                    x=x,
+                    use_cache=use_cache,
+                    engram_hashes=engram_hashes,
+                )
+
+        if x.dim() == 4:
+            x = x.mean(dim=2)
+
+        if self.block_device_map and x.device != self.output_device:
+            x = move_tensor_to_device(x, self.output_device)
         x = self.final_norm(x)
         logits = self.out_head(x)
 
         return logits
+
+    def reset_cache(self):
+        for block in self.transformer_blocks:
+            block.reset_cache()
 
 def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache=True):
     """
@@ -737,6 +1297,8 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
     # TODO: look into CUDA synchronization
 
     model.eval()
+    model.reset_cache()
+    model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg", engram_cfg)
 
     context_len = context_size or 256
     batch_size, base_len = input_ids.shape
@@ -747,14 +1309,41 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
     out = torch.empty(batch_size, total_len, dtype=input_ids.dtype, device=input_ids.device)
     out[:, :base_len] = input_ids
 
-    with torch.no_grad():
+    with torch.inference_mode():
         if use_cache:
-            # TODO: Implement
-            raise NotImplementedError
+            logits = model(
+                input_ids,
+                use_cache=True,
+                position_offset=0,
+                engram_input_ids=input_ids,
+            )
+            next_idx = logits[:, -1].argmax(dim=-1)
+            out[:, current_len] = next_idx
+            current_len += 1
+
+            for _ in range(1, max_new_tokens):
+                step_input = out[:, current_len - 1:current_len]
+                engram_start = max(0, current_len - model_engrams_cfg.max_ngram_size)
+                engram_input_ids = out[:, engram_start:current_len]
+                logits = model(
+                    step_input,
+                    use_cache=True,
+                    position_offset=current_len - 1,
+                    engram_input_ids=engram_input_ids,
+                )
+                next_idx = logits[:, -1].argmax(dim=-1)
+                out[:, current_len] = next_idx
+                current_len += 1
         else:
             for _ in range(max_new_tokens):
                 context_start = max(0, current_len - context_len)
-                logits = model(input_ids[:, context_start:current_len], use_cache=False)
+                window = out[:, context_start:current_len]
+                logits = model(
+                    window,
+                    use_cache=False,
+                    position_offset=context_start,
+                    engram_input_ids=window,
+                )
                 next_idx = logits[:, -1].argmax(dim=-1)
                 out[:, current_len] = next_idx
                 current_len += 1
@@ -778,6 +1367,12 @@ def main():
         type=int,
         default=0,
         help="Number of experts. If 0, use dense FFN. If >0, use MoE.",
+    )
+    parser.add_argument(
+        "--num_experts_per_tok",
+        type=int,
+        default=2,
+        help="Number of routed experts per token when MoE is enabled.",
     )
     args = parser.parse_args()
 

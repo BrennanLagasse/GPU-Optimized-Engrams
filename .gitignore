@@ -1,3 +1,24 @@
 __pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 local/
 .vscode/
+.DS_Store/
+.github/
+
+# Playwright
+.playwright-cli/
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# Agent-local files
+agents/
+
+# Benchmark artifacts
+results/*.json

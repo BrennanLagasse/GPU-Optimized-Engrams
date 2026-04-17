@@ -1,0 +1,144 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+%     \PassOptionsToPackage{numbers, compress}{natbib}
+% before loading neurips_2024
+
+
+% (options are preprint, final, None)
+\usepackage[final]{neurips_2024}
+
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+\usepackage{amsmath}
+
+% My commands
+\renewcommand{\d}{\mathrm{d}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\Hq}{\mathbb{H}}
+\newcommand{\ord}[1]{\texttt{ord(#1)}}
+\newcommand{\Span}{\texttt{span}}
+\newcommand{\img}{\text{im}}
+\newcommand{\Tr}{\mathsf{Tr}}
+\newcommand{\Ann}{\mathsf{Ann}}
+
+\title{Optimizing Inference Speed for the DeepSeek Engram Architecture}
+
+\author{%
+  Brennan M. Lagasse \\
+  Yale University \\
+  \texttt{brennan.lagasse@yale.edu} \\
+  \And
+  Vincent Li\\
+  Yale University\\
+  \texttt{vincent.li.vl298@yale.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+% Background, motivation
+
+% Quick blurb on why engrams and mHC are actually valuable
+Following the development of the transformer architecture, there have been a significant number of works that present modifications to the base transformer architecture to improve capabilities for a variety of natural language tasks. However, if these high-level architectural changes are made without considering how they integrate with underlying hardware, then valuable GPU resources may be underutilized. Further, GPU networks come with many sizes and topologies, and different parallelism and networking strategies may be best for model throughput with different GPU resources. In this project, we consider how to optimize inference (and potentially training, time permitting) a transformer with the Engrams and Manifold-Constrained Hyper-Connections (mHC) optimizations proposed by Deepseek for a server with 8 H200 GPUs.
+
+\section{Background}
+
+Deepseek has recently introduced an variant of the transformer called Engrams which maintains dictionaries of learned representations of 2- and 3-token groups which are factored into the transformer block to accelerate information propogation in the case of common phrases. Additional architecture details and motivation for this design are outlined in Appendix \ref{app:architecture}. These dictionaries are fairly large, and they must be properly shareded and synchronized across GPUs during training and inference. Dictionary lookups are a potential compute bottleneck if not optimized, but there is an opportunity to perform these lookups in advance since the dictionaries all map from the tokenized text to a latent vector. This computation does not rely on the previous latent vector, and thus it is possible it may be performed in advance. There may be additional complications when combined with other optimizations such as MoE and mHC as is done in \cite{cheng_conditional_2026}.
+
+\section{Project Schedule}
+\begin{itemize}
+    \item \textbf{Implement Baseline Engrams Architecture} The Engrams paper provides a code outline for how to implement the engrams layers, but the code is not optimized or complete. We will first implement a transformer architecture with Engrams and MoE as outlined in the Engrams paper \cite{cheng_conditional_2026}. (1-2 weeks)
+
+    \item \textbf{Profile Engrams Architecture} Compute the memory requirements of the 32B/40B Engram models described in \cite{cheng_conditional_2026} combining the memory for model parameters, engram dictionaries, and the overhead required for computation of the forward and backward passes. Verify by profiling the model in practice using a tool like \href{https://github.com/ultralytics/thop}{THOP}. This information will be relevant for determining if and how the model parameters should be split across GPUs. (1-2 weeks)
+
+    \item \textbf{Parallelize Engrams Architecture for Inference} Based on the memory requirements for the Engrams model for inference, narrow down to a small set of options for how to balance between pipeline/tensor parallelism, implement (using torch distributed, NCCL, MPI) and evaluate these approaches for throughput and latency. (3-4 weeks)
+
+    \item \textbf{(Reach) Parallelize Engrams Architecture for Training} Based on the memory requirements for the Engrams model for training, narrow down to a small set of options for how to balance between pipeline/tensor parallelism and data splitting, implement and evaluate these approaches for throughput and latency. (2-3 weeks)
+
+    
+\end{itemize}
+
+
+\section{AI Infrastructure Methods}
+% Custom CUDA kernel
+% Discussion of tensor parallelism, pipeline parallelism, dependency tracking
+% Probably will have 8 H200s
+There are several methods that we are considering to achieve greater efficiency, speed, and parallelism in Engram, as compared to a naive implementation. Although the authors of the Engram paper \cite{cheng_conditional_2026} provide an implementation online, it is incomplete and stubs out many of the important components of the model, which include attention, MoE, and mHC. Therefore, we will first begin by implementing those components to arrive at a working, end-to-end implementation of Engram, in which we prioritize correctness of implementation. 
+\par After obtaining a correct implementation, we can then consider optimizing for speed. 
+\begin{enumerate}
+    \item The current Engram implementation does not have a custom CUDA kernel, and consider implementing one in order to allow for speedups via operator fusion, caching, or other optimizations, noting especially that Engram is inherently bound by memory and not by compute because it is simply a lookup in a hash table.
+    \item In order to maximize throughput when running multiple jobs in a batch (either during inference or training), we consider pipeline parallelism methods.
+    \item The memory-bound nature of Engram and fact that it relies on N-grams in token space means prefetching N-gram embeddings is possible. While the embeddings are being fetched, computation can be done in the forward pass (attention and feedforward).
+    \item If decreasing latency (time to first token) is desired, then using tensor parallelism may also be considered.
+\end{enumerate}
+
+
+\section{Deliverables}
+% Metrics
+% Latency/Time to first token? Throughput (tok/s)
+% Memory usage
+% Benchmark before/after
+
+We propose one baseline deliverable and one reach deliverable for this project. Our baseline deliverable is software for hosting a 32/40B parameter Engram-Transformer model on 8 H200s and generates responses on demand with minimal latency / maximal throughput. Our reach is to provide the spftware to train this model with the same hardware.
+
+Because the original Engram experiments used different hardware than we have access to, we intend to perform a before and after comparison of our own implementation: we will compare the original, naive implementation (before) with an optimized version (after) to benchmark the improvement.
+\par For our evaluation of model inference we will use random weights (similar to pset 1) since there are not weights available online for pretrained engram models that seem credible. For model training we recognize it may be infeasible to achieve strong performance on a model at the 32/40B parameter scale with the time and resources we have for training. However, we can still evaluate speed of training on a small number of epochs.
+
+\subsection{Engram Model Inference}
+
+Our primary metric for measuring inference success will be throughput (tok/s), especially when responses are generated in a batch setting. If possible, we will also run experiments to measure latency (time to first token) when generating a single response. 
+\par Because the N-gram table itself requires memory, we will also compare the memory required for the N-gram table with the memory required to store the rest of the model parameters.
+
+\subsection{Engram Model Training}
+
+To benchmark training, we plan to use the same metrics as we do for inference, while also accounting for time required to complete the backward pass and the memory required for gradients and optimizer states.
+
+% MoE, mHC
+% Nice to have but not necessary
+
+
+
+% Maybe discuss somewhere what an appropriate scale model is for the number of GPUs we have available. 
+
+\bibliography{refs}{}
+\bibliographystyle{plain}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\appendix
+
+\section{Additional Architectural Notes}
+\label{app:architecture}
+
+\textbf{Engrams}
+
+In language, multi-word phrases which may have meaning distinct from their component parts (i.e. proper nouns). In the context of a transformer model, the initial embeddings for these tokens will not reflect their distinct meaning within the phrase, and multiple layers of attention computations are necessary for the latent representation to reflect the change in meaning of the word in the phrase. This challenge is addressed by the Transformer with Engrams variant \cite{cheng_conditional_2026} which introduces so called 'Engram Transformer' blocks at earlier stages in the transformer architecture which map 2- and 3-grams of tokens from the input to learned latent vectors stored in a hash table. These are then factored into subsequent computation. Hash table searches are a potential bottleneck since memory queries can be expensive, so lookups must be performed efficiently, possibly taking advantage of the dependency structure of computation. Hash table lookups for all Engram Transformer blocks depend only on the original tokenized text, not the input to the layer, so these computations may be able to be frontloaded. Further, tables may be large and necessitate storage across multiple GPUs.
+
+The implementation of Engrams presented by Deepseek is combined with other optimizations including MoE and mHC (described in greater detail below)
+
+\textbf{Manifold-Constrained Hyper-Connections}
+
+A key challenge in deep learning is minimizing the problem of vanishing/exploding gradients while also not collapsing structure in deep representations. Residual connections mitigate this problem by adding the input of a layer to its output to ensure gradients of previous layers are not exponentially suppressed by gradients of subsequent layers. This is usually formulated as
+$$x_{l+1} = x_l + f(x_l)$$
+However, the standard pre-norm and post-norm implementations of residual units can cause representation collapse and fail to mitigate vanishing gradients respectively. Hyper-connections \cite{zhu_hyper-connections_2025} proposes a generalized implementation of a residual unit where $n$ independent states are computed and at for each operations these states are aggregated, passed through the operation, rescaled, and combined with rescaled initial values. More concretely, for matrices $x \in \R^{n \times d}$, $\mathcal{H}^\text{res} \in \R^{n \times n}$, $\mathcal{H}^\text{post} \in \R^{n \times 1}$, $\mathcal{H}^\text{pre} \in \R^{n \times 1}$
+$$x_{l+1} = \mathcal{H}^{\text{res}}_l x_l + {\mathcal{H}^\text{post}_l}^\top f(\mathcal{H}^\text{pre}_lx_l)$$
+where the weight matrices $\mathcal{H}$ depend on the aggregated input at the given layer. Manifold-constrained hyper-connections (mHC) resolves a numeric stability problem with HC at large depth by constraining $\mathcal{H}^\text{res}$ to the set of bistochastic matrices via projection to ensure that the norm of gradients is bounded and the output of $\mathcal{H}^\text{res}_lx_l$ is a convex combination of input features. mHC promises more stable optimization with minimal memory overhead when $n << d$ where $d$ is the feature dimension as is shown in \cite{xie_mhc_2026}. However, as the paper briefly discusses, the additional matrix multiplications and aggregations introduced by mHC need to be scheduled carefully to avoid stalling computation with dependencies.
+
+
+\end{document}
