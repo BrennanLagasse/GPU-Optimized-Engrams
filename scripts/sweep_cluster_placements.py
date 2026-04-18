@@ -128,6 +128,8 @@ def run_sweep(args):
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
     print(json.dumps(output, indent=2, sort_keys=True), flush=True)
+    if not summary and not args.allow_empty_results:
+        raise SystemExit("no successful optimized/naive benchmark pairs were produced")
     return output
 
 
@@ -142,6 +144,7 @@ def main():
     parser.add_argument("--allow-non-contiguous", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true", default=True)
     parser.add_argument("--fail-fast", dest="continue_on_error", action="store_false")
+    parser.add_argument("--allow-empty-results", action="store_true")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--prompt-length", type=int, default=8)
