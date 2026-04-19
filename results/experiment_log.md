@@ -526,6 +526,48 @@
 - Interpretation:
   - this is the highest-signal next benchmark loop because it separates placement/occupancy effects from code changes and optimizes against longer cached decode windows where the optimized path should be strongest
 
+## 2026-04-18 16:43 EDT
+- Updated future Engram placement defaults for larger benchmark presets:
+  - `large_engram`: `layer_ids=[1,15]`
+  - `target_32b_approx`: `layer_ids=[1,15]`
+  - `target_40b_approx`: `layer_ids=[1,15]`
+- Rationale:
+  - `[1,15]` matches the original demo default and is the placement to use for future larger-scale runs.
+  - this also exercises per-device Engram hash preparation under a more realistic distributed placement than the earlier contiguous `[0,1]` target-scale benchmark preset.
+- Historical benchmark results that explicitly list `layer_ids=[0,1]` remain historical measurements and should not be reinterpreted as `[1,15]` results.
+
+## 2026-04-19 16:57 EDT
+- Shifted the next benchmark scope toward serving/scheduling multiple heterogeneous requests rather than only single-stream decode speed.
+- Added a deterministic long-tail serving workload generator:
+  - default `100` requests
+  - average input length `128`
+  - average output length `128`
+  - max input/output length `1024`
+  - at least one request with `1024` input tokens and at least one request with `1024` output tokens
+- Added a static-batch scheduler with policies:
+  - `fifo`
+  - `longest_output_first`
+  - `longest_total_first`
+- Added [scripts/benchmark_serving.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/benchmark_serving.py), which can coordinate data-parallel serving replicas over GPU groups such as `0,1,2,3` and `4,5,6,7`.
+- Added [scripts/run_cluster_serving_scheduling.sh](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/run_cluster_serving_scheduling.sh) with default all-8-GPU usage via two 4-GPU model-parallel replicas.
+- Default scheduling benchmark choice:
+  - `BATCH_SIZE=8`
+  - `DEVICE_GROUPS="0,1,2,3 4,5,6,7"`
+  - effective concurrent batch size `16`
+  - policy `longest_output_first`
+- Metrics now separate:
+  - total coordinator wall time including subprocess/model load
+  - serving wall time excluding model load, computed as the slowest replica's batch-compute time
+  - requested output tokens/sec
+  - padded prefill/decode token overhead from heterogeneous static batching
+- Local validation:
+  - `python -m py_compile scripts/serving_workload.py scripts/serving_scheduler.py scripts/benchmark_serving.py scripts/estimate_scale.py`
+  - `conda run -n ai_infra_env_new pytest -q test_serving_scheduler.py`: passed
+  - CPU smoke with `tiny_engram`, `4` requests, batch size `2`: passed
+- Cluster status:
+  - remote console reached the Cloudflare Access login again on 2026-04-19
+  - OTP was requested for `vincent.li.vl298@yale.edu`
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
