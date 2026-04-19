@@ -21,7 +21,7 @@ def test_static_batches_preserve_request_count_and_measure_padding():
         requests,
         batch_size=4,
         num_replicas=2,
-        policy="longest_output_first",
+        policy="longest_input_first",
     )
     summary = summarize_schedule(batches)
 
@@ -32,3 +32,25 @@ def test_static_batches_preserve_request_count_and_measure_padding():
     assert summary["requested_output_tokens"] == 320
     assert summary["padded_prefill_tokens"] >= summary["requested_input_tokens"]
     assert summary["padded_decode_tokens"] >= summary["requested_output_tokens"]
+
+
+def test_realistic_policy_does_not_sort_by_output_length():
+    requests = build_serving_requests(count=8, mean_input=16, mean_output=16, max_input=64, max_output=64)
+    batches = make_static_batches(
+        requests,
+        batch_size=4,
+        num_replicas=1,
+        policy="longest_input_first",
+    )
+
+    ordered = [request for batch in batches for request in batch.requests]
+    assert ordered == sorted(
+        requests,
+        key=lambda request: (request.input_length, request.request_id),
+        reverse=True,
+    )
+    assert ordered != sorted(
+        requests,
+        key=lambda request: (request.output_length, request.input_length),
+        reverse=True,
+    )

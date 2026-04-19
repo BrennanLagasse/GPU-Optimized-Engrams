@@ -546,6 +546,8 @@
   - at least one request with `1024` input tokens and at least one request with `1024` output tokens
 - Added a static-batch scheduler with policies:
   - `fifo`
+  - `longest_input_first`
+  - `shortest_input_first`
   - `longest_output_first`
   - `longest_total_first`
 - Added [scripts/benchmark_serving.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/benchmark_serving.py), which can coordinate data-parallel serving replicas over GPU groups such as `0,1,2,3` and `4,5,6,7`.
@@ -554,7 +556,7 @@
   - `BATCH_SIZE=8`
   - `DEVICE_GROUPS="0,1,2,3 4,5,6,7"`
   - effective concurrent batch size `16`
-  - policy `longest_output_first`
+  - policy `longest_input_first`
 - Metrics now separate:
   - total coordinator wall time including subprocess/model load
   - serving wall time excluding model load, computed as the slowest replica's batch-compute time
@@ -567,6 +569,13 @@
 - Cluster status:
   - remote console reached the Cloudflare Access login again on 2026-04-19
   - OTP was requested for `vincent.li.vl298@yale.edu`
+
+## 2026-04-19 17:13 EDT
+- Corrected the scheduling benchmark default to avoid using unknown future output lengths.
+- Changed the default policy from `longest_output_first` to `longest_input_first`.
+- Marked `longest_output_first` and `longest_total_first` as oracle policies because they use output lengths that are only known after generation.
+- Added `policy_uses_output_lengths` to serving benchmark JSON output so reports can distinguish realistic policies from oracle upper-bound baselines.
+- `longest_output_first` remains available as an oracle comparison, but should not be used as the main realistic serving result.
 
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.

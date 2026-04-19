@@ -6,7 +6,15 @@ from typing import Iterable, Literal
 from scripts.serving_workload import ServingRequest
 
 
-SchedulePolicy = Literal["fifo", "longest_output_first", "longest_total_first"]
+SchedulePolicy = Literal[
+    "fifo",
+    "longest_input_first",
+    "shortest_input_first",
+    "longest_output_first",
+    "longest_total_first",
+]
+
+ORACLE_POLICIES = {"longest_output_first", "longest_total_first"}
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,10 @@ def order_requests(
     items = list(requests)
     if policy == "fifo":
         return items
+    if policy == "longest_input_first":
+        return sorted(items, key=lambda item: (item.input_length, item.request_id), reverse=True)
+    if policy == "shortest_input_first":
+        return sorted(items, key=lambda item: (item.input_length, item.request_id))
     if policy == "longest_output_first":
         return sorted(items, key=lambda item: (item.output_length, item.input_length), reverse=True)
     if policy == "longest_total_first":
@@ -67,7 +79,7 @@ def make_static_batches(
     *,
     batch_size: int,
     num_replicas: int = 1,
-    policy: SchedulePolicy = "longest_output_first",
+    policy: SchedulePolicy = "longest_input_first",
 ) -> list[ScheduledBatch]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

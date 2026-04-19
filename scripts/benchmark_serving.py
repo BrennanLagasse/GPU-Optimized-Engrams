@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg
 from scripts.estimate_scale import PRESETS, estimate_model_params
 from scripts.run_target_benchmark_matrix import parse_device_group
-from scripts.serving_scheduler import ScheduledBatch, make_static_batches, summarize_schedule
+from scripts.serving_scheduler import ORACLE_POLICIES, ScheduledBatch, make_static_batches, summarize_schedule
 from scripts.serving_workload import (
     ServingRequest,
     build_serving_requests,
@@ -199,6 +199,7 @@ def run_worker(args: argparse.Namespace) -> dict:
         "num_requests": len(selected),
         "batch_size": args.batch_size,
         "policy": args.policy,
+        "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
         "worker_compute_seconds": total_seconds,
         "requested_output_tokens": requested_output,
         "requested_output_tokens_per_second": requested_output / total_seconds if total_seconds else 0.0,
@@ -349,6 +350,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         "num_replicas": len(groups),
         "effective_concurrent_batch_size": args.batch_size * len(groups),
         "policy": args.policy,
+        "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
         "request_summary": summarize_requests(requests),
         "schedule_summary": summarize_schedule(batches),
         "wall_seconds": wall_seconds,
@@ -379,7 +381,17 @@ def main() -> None:
     parser.add_argument("--device-group", default="cpu")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--policy", choices=["fifo", "longest_output_first", "longest_total_first"], default="longest_output_first")
+    parser.add_argument(
+        "--policy",
+        choices=[
+            "fifo",
+            "longest_input_first",
+            "shortest_input_first",
+            "longest_output_first",
+            "longest_total_first",
+        ],
+        default="longest_input_first",
+    )
     parser.add_argument("--num-requests", type=int, default=100)
     parser.add_argument("--mean-input-tokens", type=int, default=128)
     parser.add_argument("--mean-output-tokens", type=int, default=128)
