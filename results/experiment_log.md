@@ -577,6 +577,37 @@
 - Added `policy_uses_output_lengths` to serving benchmark JSON output so reports can distinguish realistic policies from oracle upper-bound baselines.
 - `longest_output_first` remains available as an oracle comparison, but should not be used as the main realistic serving result.
 
+## 2026-04-20 13:19 EDT
+- Successfully ran the scheduling-oriented `target_40b_approx` serving benchmark on `gpu003`.
+- Command:
+  - `BATCH_SIZE=8 POLICY=longest_input_first DEVICE_GROUPS="0,1,2,3 4,5,6,7" OUTPUT=results/serving_scheduling_target_40b_input_known_b8_rerun.json bash scripts/run_cluster_serving_scheduling.sh`
+- Setup:
+  - `8 x NVIDIA H200`
+  - two 4-GPU model-parallel replicas used as data-parallel serving workers
+  - `100` deterministic heterogeneous requests
+  - average input/output lengths: `128` / `128`
+  - max input/output lengths: `1024` / `1024`
+  - total input/output tokens: `12,800` / `12,800`
+  - realistic scheduler: `longest_input_first`
+  - `policy_uses_output_lengths=false`
+- Result:
+  - serving wall time excluding model load: `165.9673 s`
+  - serving requested output throughput: `77.1236 tok/s`
+  - full coordinator wall time including model load/subprocess startup: `280.4590 s`
+  - full-wall requested output throughput: `45.6395 tok/s`
+  - schedule batches: `13`
+  - effective concurrent batch size: `16`
+  - prefill padding overhead: `1.33x`
+  - decode padding overhead: `3.3278x`
+- Replica breakdown:
+  - replica 0 on GPUs `0,1,2,3`: `52` requests, `6,267` output tokens, `165.9673 s`, `37.7604 tok/s`
+  - replica 1 on GPUs `4,5,6,7`: `48` requests, `6,533` output tokens, `152.3910 s`, `42.8700 tok/s`
+- During the run, GPU memory was approximately `38-41 GiB` on the heavier shards and about `39 GiB` on the fourth shard per replica, with all 8 GPUs allocated.
+- First run exposed and fixed a model-parallel serving bug:
+  - generated `next_idx` came back on the model output device while the Engram decode window was on the input device
+  - fixed by moving generated token IDs back to the input device before constructing the next cached Engram window
+  - fix committed as `4e2bc07`
+
 ## Next Profiling Targets
 - Increase the target-scale decode-length benchmark matrix beyond `max_new_tokens=16` to map where the cached optimized gap saturates.
 - Reduce model-parallel overhead:
