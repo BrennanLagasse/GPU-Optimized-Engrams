@@ -172,13 +172,19 @@ def serve_static_batch_naive(
     )
     max_output = batch.max_output_length
     context_len = config["context_length"]
-    output = input_ids
+    output = torch.empty(
+        (input_ids.shape[0], input_ids.shape[1] + max_output),
+        device=input_ids.device,
+        dtype=input_ids.dtype,
+    )
+    output[:, : input_ids.shape[1]] = input_ids
+    current_len = input_ids.shape[1]
     sync_device(device)
     start = time.perf_counter()
     with torch.inference_mode():
         for generated in range(max_output):
-            context_start = max(0, output.shape[1] - context_len)
-            window = output[:, context_start:]
+            context_start = max(0, current_len - context_len)
+            window = output[:, context_start:current_len]
             logits = model(
                 window,
                 use_cache=False,
@@ -186,7 +192,8 @@ def serve_static_batch_naive(
                 engram_input_ids=window,
             )
             next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=output.device)
-            output = torch.cat([output, next_idx], dim=1)
+            output[:, current_len : current_len + 1] = next_idx
+            current_len += 1
     sync_device(device)
     seconds = time.perf_counter() - start
     return {
