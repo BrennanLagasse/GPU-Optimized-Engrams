@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Useful overrides:
 #   BATCH_SIZE=4 bash scripts/run_cluster_serving_scheduling.sh
-#   POLICY=random OUTPUT=results/serving_scheduling_target_40b_naive_random.json bash scripts/run_cluster_serving_scheduling.sh
+#   MODEL_IMPL=naive POLICY=random OUTPUT=results/serving_scheduling_target_40b_naive_random.json bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=fifo bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=longest_output_first OUTPUT=results/serving_scheduling_target_40b_oracle_output.json bash scripts/run_cluster_serving_scheduling.sh
 #   DEVICE_GROUPS="0,1,2,3 4,5,6,7" bash scripts/run_cluster_serving_scheduling.sh
@@ -20,6 +20,7 @@ BRANCH="${BRANCH:-engrams-baseline-benchmarking}"
 PRESET="${PRESET:-target_40b_approx}"
 DEVICE_GROUPS="${DEVICE_GROUPS:-0,1,2,3 4,5,6,7}"
 DTYPE="${DTYPE:-bfloat16}"
+MODEL_IMPL="${MODEL_IMPL:-optimized_cached}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 POLICY="${POLICY:-longest_input_first}"
 NUM_REQUESTS="${NUM_REQUESTS:-100}"
@@ -50,6 +51,7 @@ cmd=(
   --preset "${PRESET}"
   --device-groups ${DEVICE_GROUPS}
   --dtype "${DTYPE}"
+  --model-impl "${MODEL_IMPL}"
   --batch-size "${BATCH_SIZE}"
   --policy "${POLICY}"
   --num-requests "${NUM_REQUESTS}"

@@ -13,6 +13,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg
+from engrams_naive import NaiveEngramsModel
 from scripts.estimate_scale import PRESETS, estimate_model_params
 from scripts.run_target_benchmark_matrix import parse_device_group
 from scripts.serving_scheduler import ORACLE_POLICIES, ScheduledBatch, make_static_batches, summarize_schedule
@@ -93,7 +94,7 @@ def random_padded_batch(
     return input_ids
 
 
-def serve_static_batch(
+def serve_static_batch_optimized(
     model: EngramsModel,
     batch: ScheduledBatch,
     *,
@@ -155,6 +156,65 @@ def serve_static_batch(
     }
 
 
+def serve_static_batch_naive(
+    model: NaiveEngramsModel,
+    batch: ScheduledBatch,
+    *,
+    config: dict,
+    device: torch.device,
+    seed: int,
+) -> dict[str, float | int]:
+    input_ids = random_padded_batch(
+        batch.requests,
+        vocab_size=config["vocab_size"],
+        device=device,
+        seed=seed + batch.batch_id,
+    )
+    max_output = batch.max_output_length
+    context_len = config["context_length"]
+    output = input_ids
+    sync_device(device)
+    start = time.perf_counter()
+    with torch.inference_mode():
+        for generated in range(max_output):
+            context_start = max(0, output.shape[1] - context_len)
+            window = output[:, context_start:]
+            logits = model(
+                window,
+                use_cache=False,
+                position_offset=context_start,
+                engram_input_ids=window,
+            )
+            next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=output.device)
+            output = torch.cat([output, next_idx], dim=1)
+    sync_device(device)
+    seconds = time.perf_counter() - start
+    return {
+        "batch_id": batch.batch_id,
+        "replica_id": batch.replica_id,
+        "batch_size": batch.batch_size,
+        "max_input_length": batch.max_input_length,
+        "max_output_length": batch.max_output_length,
+        "requested_input_tokens": batch.requested_input_tokens,
+        "requested_output_tokens": batch.requested_output_tokens,
+        "padded_prefill_tokens": batch.padded_prefill_tokens,
+        "padded_decode_tokens": batch.padded_decode_tokens,
+        "seconds": seconds,
+    }
+
+
+def build_model(args: argparse.Namespace, config: dict, device: torch.device, dtype: torch.dtype):
+    model_cls = EngramsModel if args.model_impl == "optimized_cached" else NaiveEngramsModel
+    model = model_cls(config)
+    device_map = config.get("device_map") or []
+    if device_map:
+        model.apply_device_map(dtype=dtype)
+    else:
+        model = model.to(device=device, dtype=dtype)
+    model.eval()
+    return model
+
+
 def run_worker(args: argparse.Namespace) -> dict:
     preset = PRESETS[args.preset]
     group = parse_device_group(args.device_group)
@@ -186,15 +246,11 @@ def run_worker(args: argparse.Namespace) -> dict:
         )
     config = config_from_preset(preset, device_map)
     torch.manual_seed(args.seed)
-    model = EngramsModel(config)
-    if device_map:
-        model.apply_device_map(dtype=dtype)
-    else:
-        model = model.to(device=device, dtype=dtype)
-    model.eval()
+    model = build_model(args, config=config, device=device, dtype=dtype)
+    serve_batch = serve_static_batch_optimized if args.model_impl == "optimized_cached" else serve_static_batch_naive
 
     batch_results = [
-        serve_static_batch(model, batch, config=config, device=device, seed=args.seed)
+        serve_batch(model, batch, config=config, device=device, seed=args.seed)
         for batch in batches
     ]
     total_seconds = sum(item["seconds"] for item in batch_results)
@@ -207,7 +263,7 @@ def run_worker(args: argparse.Namespace) -> dict:
         "replica_id": args.replica_id,
         "num_requests": len(selected),
         "batch_size": args.batch_size,
-        "model_impl": "optimized_cached",
+        "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
         "policy": args.policy,
         "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
@@ -297,6 +353,8 @@ def run_coordinator(args: argparse.Namespace) -> dict:
             group["physical"],
             "--dtype",
             args.dtype,
+            "--model-impl",
+            args.model_impl,
             "--batch-size",
             str(args.batch_size),
             "--policy",
@@ -358,7 +416,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         "preset": args.preset,
         "model_size_params_approx": estimate_model_params(PRESETS[args.preset])["total_params_approx"],
         "dtype": args.dtype,
-        "model_impl": "optimized_cached",
+        "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
         "batch_size_per_replica": args.batch_size,
         "num_replicas": len(groups),
@@ -394,6 +452,7 @@ def main() -> None:
     parser.add_argument("--device-groups", nargs="+", default=["0,1,2,3", "4,5,6,7"])
     parser.add_argument("--device-group", default="cpu")
     parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument("--model-impl", choices=["optimized_cached", "naive"], default="optimized_cached")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
         "--policy",
