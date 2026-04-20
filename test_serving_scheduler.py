@@ -54,3 +54,28 @@ def test_realistic_policy_does_not_sort_by_output_length():
         key=lambda request: (request.output_length, request.input_length),
         reverse=True,
     )
+
+
+def test_random_policy_is_deterministic_and_differs_from_fifo():
+    requests = build_serving_requests(count=10, mean_input=32, mean_output=32, max_input=128, max_output=128)
+
+    first = make_static_batches(
+        requests,
+        batch_size=5,
+        num_replicas=1,
+        policy="random",
+        seed=7,
+    )
+    second = make_static_batches(
+        requests,
+        batch_size=5,
+        num_replicas=1,
+        policy="random",
+        seed=7,
+    )
+
+    first_order = [request.request_id for batch in first for request in batch.requests]
+    second_order = [request.request_id for batch in second for request in batch.requests]
+
+    assert first_order == second_order
+    assert first_order != [request.request_id for request in requests]

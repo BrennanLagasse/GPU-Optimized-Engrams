@@ -25,6 +25,14 @@ from scripts.serving_workload import (
 )
 
 
+def scheduler_impl(policy: str) -> str:
+    if policy == "random":
+        return "naive_random"
+    if policy in ORACLE_POLICIES:
+        return "oracle"
+    return "input_known"
+
+
 def config_from_preset(preset: dict, device_map: list[str]) -> dict:
     return {
         "vocab_size": preset["vocab_size"],
@@ -174,6 +182,7 @@ def run_worker(args: argparse.Namespace) -> dict:
             batch_size=args.batch_size,
             num_replicas=1,
             policy=args.policy,
+            seed=args.seed,
         )
     config = config_from_preset(preset, device_map)
     torch.manual_seed(args.seed)
@@ -198,6 +207,8 @@ def run_worker(args: argparse.Namespace) -> dict:
         "replica_id": args.replica_id,
         "num_requests": len(selected),
         "batch_size": args.batch_size,
+        "model_impl": "optimized_cached",
+        "scheduler_impl": scheduler_impl(args.policy),
         "policy": args.policy,
         "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
         "worker_compute_seconds": total_seconds,
@@ -234,6 +245,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         batch_size=args.batch_size,
         num_replicas=len(groups),
         policy=args.policy,
+        seed=args.seed,
     )
     request_file = args.output.with_suffix(".requests.json") if args.output else Path("results/serving_requests.json")
     write_requests(request_file, requests)
@@ -346,6 +358,8 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         "preset": args.preset,
         "model_size_params_approx": estimate_model_params(PRESETS[args.preset])["total_params_approx"],
         "dtype": args.dtype,
+        "model_impl": "optimized_cached",
+        "scheduler_impl": scheduler_impl(args.policy),
         "batch_size_per_replica": args.batch_size,
         "num_replicas": len(groups),
         "effective_concurrent_batch_size": args.batch_size * len(groups),
@@ -385,6 +399,7 @@ def main() -> None:
         "--policy",
         choices=[
             "fifo",
+            "random",
             "longest_input_first",
             "shortest_input_first",
             "longest_output_first",

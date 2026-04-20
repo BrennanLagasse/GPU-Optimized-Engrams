@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
@@ -8,6 +9,7 @@ from scripts.serving_workload import ServingRequest
 
 SchedulePolicy = Literal[
     "fifo",
+    "random",
     "longest_input_first",
     "shortest_input_first",
     "longest_output_first",
@@ -55,10 +57,16 @@ class ScheduledBatch:
 def order_requests(
     requests: Iterable[ServingRequest],
     policy: SchedulePolicy,
+    *,
+    seed: int = 0,
 ) -> list[ServingRequest]:
     items = list(requests)
     if policy == "fifo":
         return items
+    if policy == "random":
+        shuffled = list(items)
+        random.Random(seed).shuffle(shuffled)
+        return shuffled
     if policy == "longest_input_first":
         return sorted(items, key=lambda item: (item.input_length, item.request_id), reverse=True)
     if policy == "shortest_input_first":
@@ -80,13 +88,14 @@ def make_static_batches(
     batch_size: int,
     num_replicas: int = 1,
     policy: SchedulePolicy = "longest_input_first",
+    seed: int = 0,
 ) -> list[ScheduledBatch]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if num_replicas <= 0:
         raise ValueError("num_replicas must be positive")
 
-    ordered = order_requests(requests, policy)
+    ordered = order_requests(requests, policy, seed=seed)
     batches = []
     for batch_id, start in enumerate(range(0, len(ordered), batch_size)):
         chunk = tuple(ordered[start : start + batch_size])
