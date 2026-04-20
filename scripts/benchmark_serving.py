@@ -110,7 +110,7 @@ def serve_static_batch(
             position_offset=0,
             engram_input_ids=input_ids,
         )
-        next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
+        next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=input_ids.device)
         engram_window = torch.cat(
             [input_ids[:, -max(config["engrams_cfg"].max_ngram_size - 1, 1) :], next_idx],
             dim=1,
@@ -126,7 +126,7 @@ def serve_static_batch(
                 position_offset=input_ids.shape[1] + generated - 1,
                 engram_input_ids=engram_window,
             )
-            next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
+            next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=input_ids.device)
             engram_window = torch.cat([engram_window, next_idx], dim=1)[
                 :, -config["engrams_cfg"].max_ngram_size :
             ]
