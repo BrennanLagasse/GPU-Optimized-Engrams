@@ -743,3 +743,15 @@
   - the large 40B batched serving model-path gain is mostly generic KV-cached serving versus full-context recompute
   - the exact cached Engram `step_kernel` optimization is not a major end-to-end contributor in this 40B batched serving workload, even though it remains useful in smaller cached Engram microbenchmarks
   - further serving gains should likely target dynamic batching / active-row compaction / scheduling rather than more Engram local-mixing micro-optimization
+
+## 2026-04-21 14:40 EDT
+
+- Added [results/current_findings_2026-04-21_1440.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/current_findings_2026-04-21_1440.md).
+- The report consolidates:
+  - scheduler ablation results
+  - cached-full Engram ablation results
+  - corrected attribution of the `29.42x` full-bundle serving speedup
+  - recommended next work
+- Key conclusion:
+  - the large 40B batched-serving gain is primarily generic KV-cached incremental decode plus scheduler choice
+  - the Engram-specific `step_kernel` is near noise-level in this target-scale serving workload, despite helping smaller cached Engram microbenchmarks
