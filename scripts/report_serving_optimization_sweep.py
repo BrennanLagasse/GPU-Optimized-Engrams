@@ -30,6 +30,8 @@ def executed_decode_tokens(data: dict) -> int:
 
 def summarize_file(path: Path) -> dict:
     data = load(path)
+    if data.get("mode") != "coordinator":
+        raise ValueError(f"{path} is not a coordinator benchmark output")
     summary = data.get("schedule_summary", {})
     return {
         "path": path,
@@ -71,7 +73,12 @@ def main() -> None:
     args = parser.parse_args()
 
     files = sorted(args.results_dir.glob(args.pattern))
-    items = [summarize_file(path) for path in files]
+    items = []
+    for path in files:
+        try:
+            items.append(summarize_file(path))
+        except ValueError:
+            continue
     baseline_path = args.results_dir / args.baseline
     baseline = load(baseline_path)
     baseline_seconds = serving_seconds(baseline)

@@ -780,3 +780,32 @@
   - it is not an oracle scheduler because it does not sort by unknown output lengths before serving
   - it greatly improves the naive padded baseline but slows the optimized cached path in this run, likely because per-step filtering and cache `index_select` overhead outweigh saved compute
   - current best deployable 40B result remains `optimized_cached + longest_input_first + static` at `165.990s`
+
+## 2026-04-21 16:55 EDT
+
+- Ran a follow-up serving optimization sweep on `gpu003` (`8 x NVIDIA H200`) for the same 40B 100-request workload.
+- Added:
+  - `input_bucketed_random` scheduling policy, which uses known input-length buckets and randomizes within each bucket
+  - `scripts/run_cluster_serving_optimization_sweep.sh`
+  - `scripts/report_serving_optimization_sweep.py`
+  - [results/serving_optimization_sweep_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_optimization_sweep_report_2026-04-21.md)
+- Measured variants:
+  - batch-size sweep for `optimized_cached + longest_input_first + static`: B1, B2, B4, B16
+  - compact decode for B4 and B16
+  - input-bucketed random static batching for B8 and B16
+- Results:
+  - previous best `optimized_cached + longest_input_first + static + B8`: `165.990s`, `77.113 tok/s`
+  - `optimized_cached + longest_input_first + compact + B16`: `164.075s`, `78.013 tok/s`
+  - repeat `optimized_cached + longest_input_first + compact + B16`: `163.306s`, about `78.381 tok/s`
+  - `optimized_cached + longest_input_first + static + B4`: `176.799s`
+  - `optimized_cached + longest_input_first + static + B16`: `183.841s`
+  - `optimized_cached + input_bucketed_random + static + B8`: `191.878s`
+  - `optimized_cached + input_bucketed_random + static + B16`: `231.194s`
+  - `optimized_cached + longest_input_first + static + B2`: `231.256s`
+  - `optimized_cached + longest_input_first + static + B1`: `253.385s`
+- Interpretation:
+  - B16 compact is a small but repeatable improvement over the prior best: about `1.2%` to `1.6%`
+  - smaller static batches reduce padding but lose too much batched GPU throughput
+  - B16 static increases padding too much unless compaction is enabled
+  - input-bucketed randomization did not help
+  - true continuous batching was not implemented because the current attention cache has one shared cache position per batch; row refill requires per-row cache positions or a paged-cache design

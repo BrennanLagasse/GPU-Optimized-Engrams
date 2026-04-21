@@ -97,9 +97,10 @@ The realistic scheduler improves serving time by reducing known input/prefill pa
 - Removes completed batch rows online after completion is observed, then compacts model caches with the surviving row indices.
 - This is realistic because a server knows when a request finishes, even though it does not know that true output length before generation starts.
 - Result for `naive + random`: `4882.758s -> 1079.463s`, a `4.52x` speedup, because executed decode work dropped from `43,584` padded steps to the requested `12,800` steps.
-- Result for `optimized_cached + longest_input_first`: `165.990s -> 182.102s`, a `9.71%` slowdown despite reducing executed decode steps from `42,596` to `12,800`.
+- Result for `optimized_cached + longest_input_first + B8`: `165.990s -> 182.102s`, a `9.71%` slowdown despite reducing executed decode steps from `42,596` to `12,800`.
+- Result for `optimized_cached + longest_input_first + B16`: `164.075s` first run and `163.306s` repeat, a small improvement over the prior `B8` static best.
 - Result for `optimized_cached + oracle`: `119.568s -> 173.919s`, a `45.45%` slowdown.
-- Conclusion: active-row compaction is a useful ablation and substantially improves the naive padded baseline, but for the current 40B optimized model-parallel serving path its per-step filtering/cache-compaction overhead outweighs the saved decode compute.
+- Conclusion: active-row compaction is useful, but its value depends on batch size. At B8 the overhead outweighed saved compute; at B16 the larger decode-padding reduction produced a small repeatable gain.
 
 `greedy_prefill` replica assignment:
 - Intended to balance known padded prefill work across the two 4-GPU replicas.
@@ -124,16 +125,18 @@ This also explains the difference from batch-size-1 experiments. At batch size 1
 Best realistic result:
 - `MODEL_IMPL=optimized_cached`
 - `POLICY=longest_input_first`
+- `DECODE_MODE=compact`
+- `BATCH_SIZE=16`
 - `REPLICA_ASSIGNMENT=round_robin`
-- Serving time: `165.990s`
-- Serving throughput: `77.113 requested output tok/s`
-- Speedup over `naive + random`: `29.42x`
-- Serving-time reduction over `naive + random`: `96.60%`
+- Serving time: `163.306s` on repeat, `164.075s` on first run
+- Serving throughput: about `78 requested output tok/s`
+- Speedup over `naive + random + static`: `29.90x`
+- Serving-time reduction over `naive + random + static`: `96.66%`
 
 `cached_full_engram + longest_input_first` is extremely close at `167.351s`, so the practical target-scale serving win should be attributed to cached incremental decoding plus scheduler choice, not to the Engram `step_kernel`.
 
 ## Recommended Next Work
 
-- Treat active-row compaction as implemented and measured; keep it available, but do not use it as the default optimized path unless a future implementation avoids the per-step compaction overhead.
-- Test continuous batching with larger request counts and arrival processes, not just a fixed 100-request batch.
+- Treat `BATCH_SIZE=16` plus active-row compaction as the current best deployable variant, but present the improvement as modest because it is only about `1.2%` to `1.6%` over the previous best.
+- True continuous batching requires a KV-cache refactor for per-row cache positions or paged cache blocks; the current shared-position cache cannot safely admit new variable-length requests into completed rows.
 - Keep Engram `step_kernel` in the optimized path because it is exact and helps smaller microbenchmarks, but do not present it as the driver of 40B serving speedup.
