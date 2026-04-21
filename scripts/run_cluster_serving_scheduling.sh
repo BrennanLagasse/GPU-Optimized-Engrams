@@ -12,6 +12,7 @@ set -euo pipefail
 # Useful overrides:
 #   BATCH_SIZE=4 bash scripts/run_cluster_serving_scheduling.sh
 #   MODEL_IMPL=naive POLICY=random OUTPUT=results/serving_scheduling_target_40b_naive_random.json bash scripts/run_cluster_serving_scheduling.sh
+#   MODEL_IMPL=cached_full_engram POLICY=random OUTPUT=results/serving_scheduling_target_40b_cached_full_random.json bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=fifo bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=longest_output_first OUTPUT=results/serving_scheduling_target_40b_oracle_output.json bash scripts/run_cluster_serving_scheduling.sh
 #   REPLICA_ASSIGNMENT=greedy_prefill bash scripts/run_cluster_serving_scheduling.sh

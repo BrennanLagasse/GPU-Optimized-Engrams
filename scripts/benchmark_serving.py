@@ -34,7 +34,7 @@ def scheduler_impl(policy: str) -> str:
     return "input_known"
 
 
-def config_from_preset(preset: dict, device_map: list[str]) -> dict:
+def config_from_preset(preset: dict, device_map: list[str], *, cached_short_conv_mode: str = "step_kernel") -> dict:
     return {
         "vocab_size": preset["vocab_size"],
         "context_length": preset["context_length"],
@@ -60,7 +60,7 @@ def config_from_preset(preset: dict, device_map: list[str]) -> dict:
             seed=engram_cfg.seed,
             kernel_size=preset["kernel_size"],
             use_short_conv=preset.get("use_short_conv", True),
-            cached_inference_short_conv_mode="step_kernel",
+            cached_inference_short_conv_mode=cached_short_conv_mode,
         ),
     }
 
@@ -211,7 +211,7 @@ def serve_static_batch_naive(
 
 
 def build_model(args: argparse.Namespace, config: dict, device: torch.device, dtype: torch.dtype):
-    model_cls = EngramsModel if args.model_impl == "optimized_cached" else NaiveEngramsModel
+    model_cls = EngramsModel if args.model_impl != "naive" else NaiveEngramsModel
     model = model_cls(config)
     device_map = config.get("device_map") or []
     if device_map:
@@ -252,10 +252,11 @@ def run_worker(args: argparse.Namespace) -> dict:
             replica_assignment=args.replica_assignment,
             seed=args.seed,
         )
-    config = config_from_preset(preset, device_map)
+    cached_short_conv_mode = "full" if args.model_impl == "cached_full_engram" else "step_kernel"
+    config = config_from_preset(preset, device_map, cached_short_conv_mode=cached_short_conv_mode)
     torch.manual_seed(args.seed)
     model = build_model(args, config=config, device=device, dtype=dtype)
-    serve_batch = serve_static_batch_optimized if args.model_impl == "optimized_cached" else serve_static_batch_naive
+    serve_batch = serve_static_batch_naive if args.model_impl == "naive" else serve_static_batch_optimized
 
     batch_results = [
         serve_batch(model, batch, config=config, device=device, seed=args.seed)
@@ -465,7 +466,11 @@ def main() -> None:
     parser.add_argument("--device-groups", nargs="+", default=["0,1,2,3", "4,5,6,7"])
     parser.add_argument("--device-group", default="cpu")
     parser.add_argument("--dtype", default="bfloat16")
-    parser.add_argument("--model-impl", choices=["optimized_cached", "naive"], default="optimized_cached")
+    parser.add_argument(
+        "--model-impl",
+        choices=["optimized_cached", "cached_full_engram", "naive"],
+        default="optimized_cached",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
         "--policy",

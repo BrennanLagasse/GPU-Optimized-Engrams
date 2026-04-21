@@ -700,3 +700,20 @@
 - Optimization result:
   - realistic `greedy_prefill` replica assignment did not improve makespan for this deterministic workload; it was `1.74%` slower than round-robin after input-known scheduling.
   - oracle `greedy_oracle` replica assignment improved optimized oracle serving time by `8.11%`, but it is not deployable because it uses true output lengths.
+
+## 2026-04-21 14:11 EDT
+
+- Added a cached Engram-specific serving ablation path.
+- New `MODEL_IMPL=cached_full_engram` in `scripts/benchmark_serving.py`:
+  - uses the same KV-cached static serving loop as `optimized_cached`
+  - forces `cached_inference_short_conv_mode="full"` instead of the exact `step_kernel` path
+  - isolates the Engram cached-step optimization from generic cached serving
+- Added `scripts/run_cluster_cached_engram_ablation_matrix.sh` to run:
+  - `cached_full_engram + random`
+  - `cached_full_engram + longest_input_first`
+  - `cached_full_engram + longest_output_first`
+- Added `scripts/report_cached_engram_ablation.py` to compare naive, cached-full, and optimized step-kernel paths under random, input-known, and oracle schedulers.
+- Validation:
+  - `python -m py_compile scripts/benchmark_serving.py scripts/report_cached_engram_ablation.py`
+  - `conda run -n ai_infra_env_new pytest -q test_serving_scheduler.py test_engrams.py`: `26 passed`
+  - CPU serving smoke for `MODEL_IMPL=cached_full_engram`
