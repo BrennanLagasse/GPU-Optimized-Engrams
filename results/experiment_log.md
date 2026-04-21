@@ -838,3 +838,13 @@
   - `vllm` was not importable locally
   - `sglang` was not importable locally
   - installing either would not produce a fair Engram baseline without model integration work
+- Added `scripts/simulate_serving_architectures.py`, a discrete-event simulator for bursty/Poisson/closed serving arrivals.
+  - It models static batching, idealized continuous batching, decode microbatching, and prefill/decode disaggregation.
+  - Absolute times are calibrated so `static_b16_compact` matches the measured `163.306s` H200 repeat.
+  - Under bursty arrivals, the simulator estimates:
+    - ideal continuous paged-KV with 32 slots and mild TP speedup: `17.824s`
+    - ideal continuous paged-KV with 16 slots: `21.058s`
+    - prefill/decode disaggregation with 4 prefill workers and 16 decode slots: `41.393s`
+    - static B8 compact: `157.788s`
+    - static B16 compact baseline: `163.306s`
+  - Interpretation: prefill/decode disaggregation is likely high-upside in a realistic arrival-process setting, but only after request-level KV metadata and KV handoff exist.

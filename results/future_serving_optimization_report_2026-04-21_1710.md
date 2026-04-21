@@ -27,6 +27,10 @@ Generated report:
 Added architecture probe:
 - [serving_architecture_probe_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_architecture_probe_2026-04-21.md)
 
+Added discrete-event architecture simulation:
+- [serving_architecture_simulation_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_architecture_simulation_report_2026-04-21.md)
+- The raw JSON output is generated locally by the command below and ignored by Git under the repo's `results/*.json` rule.
+
 ## Cost-Model Result
 
 The top estimated strategy family is idealized continuous refill with a paged/per-row KV cache:
@@ -35,6 +39,21 @@ The top estimated strategy family is idealized continuous refill with a paged/pe
 - Estimated improvement if implemented cleanly: about `1.04x`, or roughly `3.9%` serving-time reduction
 
 This is not a large predicted gain, but it is the only remaining path that directly addresses decode waste without per-step physical cache compaction.
+
+## Architecture Simulation Result
+
+After the initial cost model, I added a discrete-event simulator with bursty arrivals. This is a better fit for prefill/decode disaggregation because disaggregation primarily helps by overlapping stages and reducing head-of-line blocking, which a closed 100-request batch cost model underrepresents.
+
+The simulation is calibrated so `static_b16_compact` matches the measured repeat result `163.306s`.
+
+Top simulated families:
+- Idealized continuous batching with paged/per-row KV, 32 slots, mild TP speedup: `17.824s`
+- Idealized continuous batching with paged/per-row KV, 16 slots: `21.058s`
+- Prefill/decode disaggregation with 4 prefill workers and 16 decode slots: `41.393s`
+- Static B8 compact: `157.788s`
+- Static B16 compact baseline: `163.306s`
+
+Interpretation: your expectation about prefill/decode disaggregation is reasonable. In an online/bursty setting, disaggregation can plausibly be much more valuable than the original closed-batch cost model suggested. The key caveat is unchanged: this requires real request-level KV state and a KV handoff path.
 
 ## Feasibility Findings
 
@@ -69,7 +88,7 @@ Result: same blocker as continuous batching. Separating prefill groups from deco
 
 `6. Prefill/decode disaggregation`
 
-Result: not useful as a small patch before request-level KV state exists. It requires KV handoff between workers/GPU groups.
+Result: not useful as a small patch before request-level KV state exists, but the discrete-event simulator suggests it is a high-upside architecture once paged/per-row KV exists. The best simulated disaggregated case was about `41.393s`, or `3.95x` faster than the calibrated `static_b16_compact` baseline.
 
 `7. Tensor parallelism`
 
@@ -81,11 +100,11 @@ Result: checked local availability. `vllm` and `sglang` are not installed locall
 
 `9. Cost-model-driven scheduler search`
 
-Result: implemented. It suggests idealized continuous refill / paged KV is the only remaining scheduler family likely to beat the current best, and the predicted gain is modest unless arrival-process workloads reveal larger benefits.
+Result: implemented. The closed-batch cost model suggested modest gains, while the bursty-arrival architecture simulator suggests much larger gains for continuous batching and prefill/decode disaggregation.
 
 ## Recommendation
 
-Do not spend more time on static-batch scheduler tweaks unless we need extra repeats for variance. The next meaningful optimization is a per-row or paged KV-cache refactor, followed by true continuous batching.
+Do not spend more time on static-batch scheduler tweaks unless we need extra repeats for variance. The next meaningful optimization is a per-row or paged KV-cache refactor, followed by true continuous batching and prefill/decode disaggregation.
 
 If the project scope cannot support that refactor, the current measured best should stand:
 - `MODEL_IMPL=optimized_cached`
@@ -102,6 +121,8 @@ Commands run:
 ```bash
 python -m py_compile scripts/simulate_serving_strategies.py
 python scripts/simulate_serving_strategies.py --output results/serving_strategy_cost_model_2026-04-21.md
+python -m py_compile scripts/simulate_serving_architectures.py
+python scripts/simulate_serving_architectures.py --arrival-mode bursty --arrival-rate 2.0 --report-output results/serving_architecture_simulation_report_2026-04-21.md --json-output results/serving_architecture_simulation_2026-04-21.json
 conda run -n ai_infra_env_new pytest -q test_serving_scheduler.py
 ```
 

@@ -46,6 +46,8 @@ Prefill/decode disaggregation would require:
 
 It is unlikely to help before continuous batching is available, because current static batches still bind prefill and decode state together.
 
+However, a follow-up bursty-arrival discrete-event simulation supports prefill/decode disaggregation as a high-upside architecture once paged/per-row KV exists. The best simulated disaggregated case was about `41.393s` after calibrating static B16 compact to the measured `163.306s` repeat result.
+
 ### Tensor Parallelism
 
 The repo currently uses contiguous layer placement across devices. This is memory-oriented model parallelism, not tensor parallelism. Tensor parallelism would shard large linear projections and attention heads across GPUs within each layer, which could improve per-token latency and GPU utilization.
@@ -66,4 +68,4 @@ I did not install them locally because that would not by itself produce a fair E
 
 ## Current Practical Next Step
 
-The most promising next engineering path is a minimal paged/per-row KV-cache abstraction for the optimized model. Once the cache can track request-level positions, we can implement true continuous batching and decode microbatching as measured GPU paths.
+The most promising next engineering path is a minimal paged/per-row KV-cache abstraction for the optimized model. Once the cache can track request-level positions, we can implement true continuous batching, decode microbatching, and prefill/decode disaggregation as measured GPU paths.
