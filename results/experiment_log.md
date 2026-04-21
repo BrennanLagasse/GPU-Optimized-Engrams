@@ -717,3 +717,29 @@
   - `python -m py_compile scripts/benchmark_serving.py scripts/report_cached_engram_ablation.py`
   - `conda run -n ai_infra_env_new pytest -q test_serving_scheduler.py test_engrams.py`: `26 passed`
   - CPU serving smoke for `MODEL_IMPL=cached_full_engram`
+
+## 2026-04-21 14:17 EDT
+
+- Completed the cached Engram serving ablation matrix on `gpu003` (`8 x NVIDIA H200`) for the `target_40b_approx` 100-request workload.
+- Added [results/cached_engram_ablation_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/cached_engram_ablation_report_2026-04-21.md).
+- Key serving wall times excluding model load:
+  - naive + random: `4882.758s`
+  - cached_full_engram + random: `191.678s`
+  - optimized_cached + random: `192.714s`
+  - naive + longest_input_first: `3629.573s`
+  - cached_full_engram + longest_input_first: `167.351s`
+  - optimized_cached + longest_input_first: `165.990s`
+  - naive + oracle: `3271.340s`
+  - cached_full_engram + oracle: `120.373s`
+  - optimized_cached + oracle: `119.568s`
+- Attribution:
+  - generic cached serving under random scheduling: `25.47x`, `96.07%` serving-time reduction
+  - Engram `step_kernel` under random scheduling: `0.99x`, `-0.54%` serving-time reduction
+  - generic cached serving under input-known scheduling: `21.69x`, `95.39%` serving-time reduction
+  - Engram `step_kernel` under input-known scheduling: `1.01x`, `0.81%` serving-time reduction
+  - generic cached serving under oracle scheduling: `27.18x`, `96.32%` serving-time reduction
+  - Engram `step_kernel` under oracle scheduling: `1.01x`, `0.67%` serving-time reduction
+- Interpretation:
+  - the large 40B batched serving model-path gain is mostly generic KV-cached serving versus full-context recompute
+  - the exact cached Engram `step_kernel` optimization is not a major end-to-end contributor in this 40B batched serving workload, even though it remains useful in smaller cached Engram microbenchmarks
+  - further serving gains should likely target dynamic batching / active-row compaction / scheduling rather than more Engram local-mixing micro-optimization
