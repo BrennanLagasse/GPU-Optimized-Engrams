@@ -79,3 +79,22 @@ def test_random_policy_is_deterministic_and_differs_from_fifo():
 
     assert first_order == second_order
     assert first_order != [request.request_id for request in requests]
+
+
+def test_greedy_prefill_assignment_balances_known_prefill_work():
+    requests = build_serving_requests(count=24, mean_input=32, mean_output=32, max_input=128, max_output=128)
+
+    batches = make_static_batches(
+        requests,
+        batch_size=4,
+        num_replicas=2,
+        policy="longest_input_first",
+        replica_assignment="greedy_prefill",
+    )
+
+    loads = [0, 0]
+    for batch in batches:
+        loads[batch.replica_id] += batch.padded_prefill_tokens
+
+    assert {batch.replica_id for batch in batches} == {0, 1}
+    assert max(loads) - min(loads) <= max(batch.padded_prefill_tokens for batch in batches)

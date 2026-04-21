@@ -249,6 +249,7 @@ def run_worker(args: argparse.Namespace) -> dict:
             batch_size=args.batch_size,
             num_replicas=1,
             policy=args.policy,
+            replica_assignment=args.replica_assignment,
             seed=args.seed,
         )
     config = config_from_preset(preset, device_map)
@@ -272,6 +273,7 @@ def run_worker(args: argparse.Namespace) -> dict:
         "batch_size": args.batch_size,
         "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
+        "replica_assignment": args.replica_assignment,
         "policy": args.policy,
         "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
         "worker_compute_seconds": total_seconds,
@@ -308,6 +310,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         batch_size=args.batch_size,
         num_replicas=len(groups),
         policy=args.policy,
+        replica_assignment=args.replica_assignment,
         seed=args.seed,
     )
     request_file = args.output.with_suffix(".requests.json") if args.output else Path("results/serving_requests.json")
@@ -366,6 +369,8 @@ def run_coordinator(args: argparse.Namespace) -> dict:
             str(args.batch_size),
             "--policy",
             args.policy,
+            "--replica-assignment",
+            args.replica_assignment,
             "--seed",
             str(args.seed),
             "--request-file",
@@ -425,6 +430,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         "dtype": args.dtype,
         "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
+        "replica_assignment": args.replica_assignment,
         "batch_size_per_replica": args.batch_size,
         "num_replicas": len(groups),
         "effective_concurrent_batch_size": args.batch_size * len(groups),
@@ -472,6 +478,11 @@ def main() -> None:
             "longest_total_first",
         ],
         default="longest_input_first",
+    )
+    parser.add_argument(
+        "--replica-assignment",
+        choices=["round_robin", "greedy_prefill", "greedy_oracle"],
+        default="round_robin",
     )
     parser.add_argument("--num-requests", type=int, default=100)
     parser.add_argument("--mean-input-tokens", type=int, default=128)

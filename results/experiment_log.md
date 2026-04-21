@@ -653,3 +653,26 @@
   - the proposal-relevant comparison is now complete for the 100-request serving workload: naive model plus naive random scheduler versus optimized cached model plus realistic input-known scheduler
   - the oracle result is not deployable because it sorts by unknown output length, but it shows that decode heterogeneity is the remaining scheduling headroom
   - further scheduler work should focus on approximating oracle-like decode compaction without using future output lengths
+
+## 2026-04-21 11:35 EDT
+
+- Prepared the target-scale serving ablation matrix needed to attribute the `29.42x` end-to-end result.
+- Added replica assignment modes:
+  - `round_robin`: baseline static batch-to-replica assignment.
+  - `greedy_prefill`: realistic balancing of known padded prefill work across replicas.
+  - `greedy_oracle`: oracle balancing of padded prefill plus padded decode work across replicas.
+- Added `scripts/run_cluster_serving_ablation_matrix.sh`, intended cluster launch command:
+  - `nohup bash scripts/run_cluster_serving_ablation_matrix.sh > logs/serving_ablation_matrix_40b.nohup.log 2>&1 &`
+- Matrix cases:
+  - optimized cached model + random scheduler
+  - optimized cached model + input-known scheduler + greedy prefill replica assignment
+  - optimized cached model + oracle scheduler + greedy oracle replica assignment
+  - naive model + input-known scheduler
+  - naive model + oracle scheduler
+- Added `scripts/report_serving_ablation.py`, which will generate `results/serving_ablation_matrix_report.md` with:
+  - scheduler-only effect on the naive model
+  - optimized-model-only effect under random scheduling
+  - scheduler effect on the optimized model
+  - full realistic bundle effect
+  - oracle scheduler effects
+  - greedy replica-assignment effects

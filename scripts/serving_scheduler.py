@@ -17,6 +17,7 @@ SchedulePolicy = Literal[
 ]
 
 ORACLE_POLICIES = {"longest_output_first", "longest_total_first"}
+ReplicaAssignment = Literal["round_robin", "greedy_prefill", "greedy_oracle"]
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def make_static_batches(
     batch_size: int,
     num_replicas: int = 1,
     policy: SchedulePolicy = "longest_input_first",
+    replica_assignment: ReplicaAssignment = "round_robin",
     seed: int = 0,
 ) -> list[ScheduledBatch]:
     if batch_size <= 0:
@@ -96,16 +98,31 @@ def make_static_batches(
         raise ValueError("num_replicas must be positive")
 
     ordered = order_requests(requests, policy, seed=seed)
+    chunks = [
+        tuple(ordered[start : start + batch_size])
+        for start in range(0, len(ordered), batch_size)
+    ]
+    replica_loads = [0 for _ in range(num_replicas)]
     batches = []
-    for batch_id, start in enumerate(range(0, len(ordered), batch_size)):
-        chunk = tuple(ordered[start : start + batch_size])
-        batches.append(
-            ScheduledBatch(
-                batch_id=batch_id,
-                replica_id=batch_id % num_replicas,
-                requests=chunk,
-            )
+    for batch_id, chunk in enumerate(chunks):
+        if replica_assignment == "round_robin":
+            replica_id = batch_id % num_replicas
+        else:
+            replica_id = min(range(num_replicas), key=lambda idx: (replica_loads[idx], idx))
+        batch = ScheduledBatch(
+            batch_id=batch_id,
+            replica_id=replica_id,
+            requests=chunk,
         )
+        if replica_assignment == "round_robin":
+            pass
+        elif replica_assignment == "greedy_prefill":
+            replica_loads[replica_id] += batch.padded_prefill_tokens
+        elif replica_assignment == "greedy_oracle":
+            replica_loads[replica_id] += batch.padded_prefill_tokens + batch.padded_decode_tokens
+        else:
+            raise ValueError(f"unknown replica assignment: {replica_assignment}")
+        batches.append(batch)
     return batches
 
 
