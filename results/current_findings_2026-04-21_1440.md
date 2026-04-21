@@ -93,6 +93,14 @@ The realistic scheduler improves serving time by reducing known input/prefill pa
 
 ## Optimization Attempts
 
+`compact` active-row decode:
+- Removes completed batch rows online after completion is observed, then compacts model caches with the surviving row indices.
+- This is realistic because a server knows when a request finishes, even though it does not know that true output length before generation starts.
+- Result for `naive + random`: `4882.758s -> 1079.463s`, a `4.52x` speedup, because executed decode work dropped from `43,584` padded steps to the requested `12,800` steps.
+- Result for `optimized_cached + longest_input_first`: `165.990s -> 182.102s`, a `9.71%` slowdown despite reducing executed decode steps from `42,596` to `12,800`.
+- Result for `optimized_cached + oracle`: `119.568s -> 173.919s`, a `45.45%` slowdown.
+- Conclusion: active-row compaction is a useful ablation and substantially improves the naive padded baseline, but for the current 40B optimized model-parallel serving path its per-step filtering/cache-compaction overhead outweighs the saved decode compute.
+
 `greedy_prefill` replica assignment:
 - Intended to balance known padded prefill work across the two 4-GPU replicas.
 - Result: `optimized_cached + longest_input_first + greedy_prefill` took `168.879s`, versus `165.990s` for round-robin.
@@ -126,6 +134,6 @@ Best realistic result:
 
 ## Recommended Next Work
 
-- Implement dynamic batching or active-row compaction so completed rows stop consuming decode steps in static batches.
+- Treat active-row compaction as implemented and measured; keep it available, but do not use it as the default optimized path unless a future implementation avoids the per-step compaction overhead.
 - Test continuous batching with larger request counts and arrival processes, not just a fixed 100-request batch.
 - Keep Engram `step_kernel` in the optimized path because it is exact and helps smaller microbenchmarks, but do not present it as the driver of 40B serving speedup.

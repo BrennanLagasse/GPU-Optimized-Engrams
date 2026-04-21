@@ -755,3 +755,28 @@
 - Key conclusion:
   - the large 40B batched-serving gain is primarily generic KV-cached incremental decode plus scheduler choice
   - the Engram-specific `step_kernel` is near noise-level in this target-scale serving workload, despite helping smaller cached Engram microbenchmarks
+
+## 2026-04-21 15:49 EDT
+
+- Implemented and benchmarked active-row compaction for the 40B serving workload.
+- Code path:
+  - added `compact_cache(active_indices)` to optimized cached modules so KV and Engram cached state can drop completed rows
+  - added `--decode-mode {static,compact}` to `scripts/benchmark_serving.py`
+  - added `scripts/run_cluster_compact_serving_ablation.sh` and `scripts/report_compact_serving_ablation.py`
+- Cluster run:
+  - hardware: `gpu003`, `8 x NVIDIA H200`
+  - preset: `target_40b_approx`, about `39.98B` params
+  - workload: 100 deterministic heterogeneous requests, mean input/output 128, max input/output 1024, total requested output tokens 12,800
+  - layout: two 4-GPU replicas, batch size 8 per replica
+- Results:
+  - `naive + random + static`: `4882.758s`, `2.621 tok/s`, `43,584` executed/padded decode tokens
+  - `naive + random + compact`: `1079.463s`, `11.858 tok/s`, `12,800` executed decode tokens
+  - `optimized_cached + longest_input_first + static`: `165.990s`, `77.113 tok/s`, `42,596` executed/padded decode tokens
+  - `optimized_cached + longest_input_first + compact`: `182.102s`, `70.290 tok/s`, `12,800` executed decode tokens
+  - `optimized_cached + oracle + static`: `119.568s`, `107.052 tok/s`, `17,056` executed/padded decode tokens
+  - `optimized_cached + oracle + compact`: `173.919s`, `73.761 tok/s`, `12,800` executed decode tokens
+- Interpretation:
+  - active-row compaction is realistic because it drops rows only after completion is observed
+  - it is not an oracle scheduler because it does not sort by unknown output lengths before serving
+  - it greatly improves the naive padded baseline but slows the optimized cached path in this run, likely because per-step filtering and cache `index_select` overhead outweigh saved compute
+  - current best deployable 40B result remains `optimized_cached + longest_input_first + static` at `165.990s`
