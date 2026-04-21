@@ -809,3 +809,32 @@
   - B16 static increases padding too much unless compaction is enabled
   - input-bucketed randomization did not help
   - true continuous batching was not implemented because the current attention cache has one shared cache position per batch; row refill requires per-row cache positions or a paged-cache design
+
+## 2026-04-21 17:10 EDT
+
+- Probed larger serving optimization ideas:
+  - true continuous batching / refill-on-completion
+  - paged/per-row KV cache
+  - decode microbatch scheduling
+  - prefill/decode disaggregation
+  - tensor parallelism
+  - external serving baselines such as vLLM/SGLang
+  - cost-model-driven scheduler search
+- Added [results/serving_architecture_probe_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_architecture_probe_2026-04-21.md).
+- Main feasibility result:
+  - the current optimized attention cache uses one shared scalar `ptr_current_pos` per batch
+  - true continuous batching, decode microbatching, and prefill/decode disaggregation all require request-level cache positions or paged/cache-block metadata
+  - implementing those as a small scheduler-only patch would be incorrect or would require unfair recomputation
+- Added `scripts/simulate_serving_strategies.py` for cost-model-driven scheduler search.
+  - The script uses measured 40B serving points as calibration.
+  - It estimates static, compact, idealized continuous-refill, decode-microbatch, and prefill/decode-disaggregated strategies.
+  - These estimates are planning signals only, not measured GPU benchmark claims.
+- Generated [results/serving_strategy_cost_model_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_strategy_cost_model_2026-04-21.md).
+  - top estimated family: idealized continuous refill with per-row/paged KV cache
+  - estimated best: about `156.995s`, compared with current measured best `163.306s`
+  - interpretation: likely modest additional gain unless a more realistic arrival-process workload exposes larger continuous-batching benefits
+- Added [results/future_serving_optimization_report_2026-04-21_1710.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/future_serving_optimization_report_2026-04-21_1710.md).
+- External baseline check:
+  - `vllm` was not importable locally
+  - `sglang` was not importable locally
+  - installing either would not produce a fair Engram baseline without model integration work
