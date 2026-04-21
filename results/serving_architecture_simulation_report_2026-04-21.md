@@ -6,6 +6,14 @@ This is a discrete-event planning simulation, not a measured GPU benchmark.
 
 Absolute times are scaled so `static_b16_compact` matches the measured H200 repeat result `163.306s`; relative ordering still depends on the simulator assumptions.
 
+This report is self-contained enough to interpret the simulation table. It uses the same 100-request long-tail serving workload described below and compares simulated serving architectures that require paged/per-row KV cache support.
+
+Strategy coverage in this simulation:
+- `continuous_*`: idealized continuous batching with refill-on-completion and paged/per-row KV.
+- `disagg_*`: separate prefill and decode worker pools with KV handoff assumptions.
+- `decode_microbatch_*`: large prefill batches followed by smaller decode groups.
+- `static_*`: current static-batch family used as calibration and comparison.
+
 ## Workload
 
 - Requests: `100`
