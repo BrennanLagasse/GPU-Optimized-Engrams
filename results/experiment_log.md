@@ -620,3 +620,36 @@
   - steady-state tok/s
   - per-rank memory
   - decode-length scaling curves
+## 2026-04-20 22:20 EDT
+
+- Completed the requested end-to-end serving comparison on the cluster for the `target_40b_approx` preset.
+- Workload:
+  - `100` deterministic long-tailed requests
+  - mean input tokens `128`, max input tokens `1024`
+  - mean output tokens `128`, max output tokens `1024`
+  - total requested input tokens `12,800`
+  - total requested output tokens `12,800`
+  - two data-parallel replicas over device groups `0,1,2,3` and `4,5,6,7`
+  - `BATCH_SIZE=8`, effective concurrent batch size `16`
+- Naive baseline command:
+  - `MODEL_IMPL=naive POLICY=random BATCH_SIZE=8 DEVICE_GROUPS="0,1,2,3 4,5,6,7" OUTPUT=results/serving_scheduling_target_40b_naive_model_random_b8.json bash scripts/run_cluster_serving_scheduling.sh`
+- Optimized input-known command:
+  - `MODEL_IMPL=optimized_cached POLICY=longest_input_first BATCH_SIZE=8 DEVICE_GROUPS="0,1,2,3 4,5,6,7" OUTPUT=results/serving_scheduling_target_40b_optimized_input_known_b8.json bash scripts/run_cluster_serving_scheduling.sh`
+- Oracle curiosity command:
+  - `MODEL_IMPL=optimized_cached POLICY=longest_output_first BATCH_SIZE=8 DEVICE_GROUPS="0,1,2,3 4,5,6,7" OUTPUT=results/serving_scheduling_target_40b_optimized_oracle_b8.json bash scripts/run_cluster_serving_scheduling.sh`
+- Results:
+  - naive model + random scheduler: serving wall excluding model load `4882.76s`, total wall `5007.12s`, serving throughput `2.62 requested output tok/s`
+  - optimized cached model + input-known scheduler: serving wall excluding model load `165.99s`, total wall `280.49s`, serving throughput `77.11 requested output tok/s`
+  - optimized cached model + oracle scheduler: serving wall excluding model load `119.57s`, total wall `244.18s`, serving throughput `107.05 requested output tok/s`
+- Improvement:
+  - optimized/input-known vs naive/random excluding model load: `29.42x` speedup and `96.60%` lower serving time
+  - optimized/input-known vs naive/random including model load: `17.85x` speedup and `94.40%` lower total wall time
+  - oracle vs optimized/input-known excluding model load: `1.39x` speedup and `27.97%` lower serving time
+- Schedule padding:
+  - naive/random: prefill padding overhead `3.2459x`, decode padding overhead `3.4050x`
+  - optimized/input-known: prefill padding overhead `1.3300x`, decode padding overhead `3.3278x`
+  - oracle: prefill padding overhead `3.3256x`, decode padding overhead `1.3325x`
+- Interpretation:
+  - the proposal-relevant comparison is now complete for the 100-request serving workload: naive model plus naive random scheduler versus optimized cached model plus realistic input-known scheduler
+  - the oracle result is not deployable because it sorts by unknown output length, but it shows that decode heterogeneity is the remaining scheduling headroom
+  - further scheduler work should focus on approximating oracle-like decode compaction without using future output lengths
