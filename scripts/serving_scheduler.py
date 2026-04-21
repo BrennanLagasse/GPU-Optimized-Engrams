@@ -12,6 +12,7 @@ SchedulePolicy = Literal[
     "random",
     "longest_input_first",
     "shortest_input_first",
+    "input_bucketed_random",
     "longest_output_first",
     "longest_total_first",
 ]
@@ -72,6 +73,18 @@ def order_requests(
         return sorted(items, key=lambda item: (item.input_length, item.request_id), reverse=True)
     if policy == "shortest_input_first":
         return sorted(items, key=lambda item: (item.input_length, item.request_id))
+    if policy == "input_bucketed_random":
+        rng = random.Random(seed)
+        buckets: dict[int, list[ServingRequest]] = {}
+        for item in items:
+            bucket = (item.input_length - 1) // 128
+            buckets.setdefault(bucket, []).append(item)
+        ordered = []
+        for bucket in sorted(buckets, reverse=True):
+            members = buckets[bucket]
+            rng.shuffle(members)
+            ordered.extend(members)
+        return ordered
     if policy == "longest_output_first":
         return sorted(items, key=lambda item: (item.output_length, item.input_length), reverse=True)
     if policy == "longest_total_first":

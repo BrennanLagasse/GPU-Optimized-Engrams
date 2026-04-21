@@ -528,6 +528,7 @@ def main() -> None:
             "random",
             "longest_input_first",
             "shortest_input_first",
+            "input_bucketed_random",
             "longest_output_first",
             "longest_total_first",
         ],

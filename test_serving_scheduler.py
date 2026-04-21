@@ -81,6 +81,27 @@ def test_random_policy_is_deterministic_and_differs_from_fifo():
     assert first_order != [request.request_id for request in requests]
 
 
+def test_input_bucketed_random_policy_uses_only_input_buckets():
+    requests = build_serving_requests(count=16, mean_input=32, mean_output=32, max_input=128, max_output=128)
+    batches = make_static_batches(
+        requests,
+        batch_size=4,
+        num_replicas=1,
+        policy="input_bucketed_random",
+        seed=11,
+    )
+
+    ordered = [request for batch in batches for request in batch.requests]
+    buckets = [(request.input_length - 1) // 128 for request in ordered]
+
+    assert buckets == sorted(buckets, reverse=True)
+    assert ordered != sorted(
+        requests,
+        key=lambda request: (request.output_length, request.input_length),
+        reverse=True,
+    )
+
+
 def test_greedy_prefill_assignment_balances_known_prefill_work():
     requests = build_serving_requests(count=24, mean_input=32, mean_output=32, max_input=128, max_output=128)
 
