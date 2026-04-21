@@ -334,6 +334,11 @@ class ShortConv(nn.Module):
 
     def reset_cache(self):
         self.cache_x_norm = None
+
+    def compact_cache(self, active_indices: torch.Tensor):
+        if self.cache_x_norm is not None:
+            indices = active_indices.to(device=self.cache_x_norm.device, dtype=torch.long)
+            self.cache_x_norm = self.cache_x_norm.index_select(0, indices)
     
 def find_next_prime(start, seen_primes):
     candidate = start + 1
@@ -840,6 +845,10 @@ class Engram(nn.Module):
     def reset_cache(self):
         if self.short_conv is not None:
             self.short_conv.reset_cache()
+
+    def compact_cache(self, active_indices: torch.Tensor):
+        if self.short_conv is not None:
+            self.short_conv.compact_cache(active_indices)
     
 class MultiHeadAttention(nn.Module):
     def __init__(self, config):
@@ -971,6 +980,14 @@ class MultiHeadAttention(nn.Module):
     def reset_cache(self):
         self.cache_k, self.cache_v = None, None
         self.ptr_current_pos = 0
+
+    def compact_cache(self, active_indices: torch.Tensor):
+        if self.cache_k is not None:
+            indices = active_indices.to(device=self.cache_k.device, dtype=torch.long)
+            self.cache_k = self.cache_k.index_select(0, indices)
+        if self.cache_v is not None:
+            indices = active_indices.to(device=self.cache_v.device, dtype=torch.long)
+            self.cache_v = self.cache_v.index_select(0, indices)
 
 class MoEFeedForward(nn.Module):
     def __init__(self, cfg):
@@ -1129,6 +1146,11 @@ class TransformerBlock(nn.Module):
         self.attn.reset_cache()
         if self.engram is not None:
             self.engram.reset_cache()
+
+    def compact_cache(self, active_indices: torch.Tensor):
+        self.attn.compact_cache(active_indices)
+        if self.engram is not None:
+            self.engram.compact_cache(active_indices)
     
 class EngramsModel(nn.Module):
     def __init__(self, config):
@@ -1283,6 +1305,10 @@ class EngramsModel(nn.Module):
     def reset_cache(self):
         for block in self.transformer_blocks:
             block.reset_cache()
+
+    def compact_cache(self, active_indices: torch.Tensor):
+        for block in self.transformer_blocks:
+            block.compact_cache(active_indices)
 
 def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache=True):
     """

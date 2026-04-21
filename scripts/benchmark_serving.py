@@ -101,6 +101,7 @@ def serve_static_batch_optimized(
     config: dict,
     device: torch.device,
     seed: int,
+    decode_mode: str,
 ) -> dict[str, float | int]:
     input_ids = random_padded_batch(
         batch.requests,
@@ -109,9 +110,15 @@ def serve_static_batch_optimized(
         seed=seed + batch.batch_id,
     )
     max_output = batch.max_output_length
+    output_lengths = torch.tensor(
+        [request.output_length for request in batch.requests],
+        device=input_ids.device,
+        dtype=torch.long,
+    )
     model.reset_cache()
     sync_device(device)
     start = time.perf_counter()
+    executed_decode_tokens = 0
     with torch.inference_mode():
         logits = model(
             input_ids,
@@ -120,11 +127,21 @@ def serve_static_batch_optimized(
             engram_input_ids=input_ids,
         )
         next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=input_ids.device)
+        executed_decode_tokens += int(next_idx.shape[0])
         engram_window = torch.cat(
             [input_ids[:, -max(config["engrams_cfg"].max_ngram_size - 1, 1) :], next_idx],
             dim=1,
         )
         generated = 1
+        if decode_mode == "compact":
+            active = torch.nonzero(output_lengths > generated, as_tuple=False).flatten()
+            if active.numel() == 0:
+                generated = max_output
+            else:
+                model.compact_cache(active)
+                next_idx = next_idx.index_select(0, active)
+                engram_window = engram_window.index_select(0, active)
+                output_lengths = output_lengths.index_select(0, active)
         while generated < max_output:
             # For static batching, finished rows remain present until the batch's
             # longest request completes. This intentionally measures scheduling
@@ -136,10 +153,19 @@ def serve_static_batch_optimized(
                 engram_input_ids=engram_window,
             )
             next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=input_ids.device)
+            executed_decode_tokens += int(next_idx.shape[0])
             engram_window = torch.cat([engram_window, next_idx], dim=1)[
                 :, -config["engrams_cfg"].max_ngram_size :
             ]
             generated += 1
+            if decode_mode == "compact":
+                active = torch.nonzero(output_lengths > generated, as_tuple=False).flatten()
+                if active.numel() == 0:
+                    break
+                model.compact_cache(active)
+                next_idx = next_idx.index_select(0, active)
+                engram_window = engram_window.index_select(0, active)
+                output_lengths = output_lengths.index_select(0, active)
     sync_device(device)
     seconds = time.perf_counter() - start
     return {
@@ -152,6 +178,7 @@ def serve_static_batch_optimized(
         "requested_output_tokens": batch.requested_output_tokens,
         "padded_prefill_tokens": batch.padded_prefill_tokens,
         "padded_decode_tokens": batch.padded_decode_tokens,
+        "executed_decode_tokens": executed_decode_tokens,
         "seconds": seconds,
     }
 
@@ -163,6 +190,7 @@ def serve_static_batch_naive(
     config: dict,
     device: torch.device,
     seed: int,
+    decode_mode: str,
 ) -> dict[str, float | int]:
     input_ids = random_padded_batch(
         batch.requests,
@@ -172,6 +200,11 @@ def serve_static_batch_naive(
     )
     max_output = batch.max_output_length
     context_len = config["context_length"]
+    output_lengths = torch.tensor(
+        [request.output_length for request in batch.requests],
+        device=input_ids.device,
+        dtype=torch.long,
+    )
     output = torch.empty(
         (input_ids.shape[0], input_ids.shape[1] + max_output),
         device=input_ids.device,
@@ -181,6 +214,7 @@ def serve_static_batch_naive(
     current_len = input_ids.shape[1]
     sync_device(device)
     start = time.perf_counter()
+    executed_decode_tokens = 0
     with torch.inference_mode():
         for generated in range(max_output):
             context_start = max(0, current_len - context_len)
@@ -192,8 +226,16 @@ def serve_static_batch_naive(
                 engram_input_ids=window,
             )
             next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=output.device)
+            executed_decode_tokens += int(next_idx.shape[0])
             output[:, current_len : current_len + 1] = next_idx
             current_len += 1
+            if decode_mode == "compact":
+                generated_count = generated + 1
+                active = torch.nonzero(output_lengths > generated_count, as_tuple=False).flatten()
+                if active.numel() == 0:
+                    break
+                output = output.index_select(0, active)
+                output_lengths = output_lengths.index_select(0, active)
     sync_device(device)
     seconds = time.perf_counter() - start
     return {
@@ -206,6 +248,7 @@ def serve_static_batch_naive(
         "requested_output_tokens": batch.requested_output_tokens,
         "padded_prefill_tokens": batch.padded_prefill_tokens,
         "padded_decode_tokens": batch.padded_decode_tokens,
+        "executed_decode_tokens": executed_decode_tokens,
         "seconds": seconds,
     }
 
@@ -259,11 +302,12 @@ def run_worker(args: argparse.Namespace) -> dict:
     serve_batch = serve_static_batch_naive if args.model_impl == "naive" else serve_static_batch_optimized
 
     batch_results = [
-        serve_batch(model, batch, config=config, device=device, seed=args.seed)
+        serve_batch(model, batch, config=config, device=device, seed=args.seed, decode_mode=args.decode_mode)
         for batch in batches
     ]
     total_seconds = sum(item["seconds"] for item in batch_results)
     requested_output = sum(item["requested_output_tokens"] for item in batch_results)
+    executed_decode = sum(item["executed_decode_tokens"] for item in batch_results)
     result = {
         "mode": "worker",
         "preset": args.preset,
@@ -275,10 +319,12 @@ def run_worker(args: argparse.Namespace) -> dict:
         "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
         "replica_assignment": args.replica_assignment,
+        "decode_mode": args.decode_mode,
         "policy": args.policy,
         "policy_uses_output_lengths": args.policy in ORACLE_POLICIES,
         "worker_compute_seconds": total_seconds,
         "requested_output_tokens": requested_output,
+        "executed_decode_tokens": executed_decode,
         "requested_output_tokens_per_second": requested_output / total_seconds if total_seconds else 0.0,
         "batches": batch_results,
     }
@@ -372,6 +418,8 @@ def run_coordinator(args: argparse.Namespace) -> dict:
             args.policy,
             "--replica-assignment",
             args.replica_assignment,
+            "--decode-mode",
+            args.decode_mode,
             "--seed",
             str(args.seed),
             "--request-file",
@@ -432,6 +480,7 @@ def run_coordinator(args: argparse.Namespace) -> dict:
         "model_impl": args.model_impl,
         "scheduler_impl": scheduler_impl(args.policy),
         "replica_assignment": args.replica_assignment,
+        "decode_mode": args.decode_mode,
         "batch_size_per_replica": args.batch_size,
         "num_replicas": len(groups),
         "effective_concurrent_batch_size": args.batch_size * len(groups),
@@ -489,6 +538,7 @@ def main() -> None:
         choices=["round_robin", "greedy_prefill", "greedy_oracle"],
         default="round_robin",
     )
+    parser.add_argument("--decode-mode", choices=["static", "compact"], default="static")
     parser.add_argument("--num-requests", type=int, default=100)
     parser.add_argument("--mean-input-tokens", type=int, default=128)
     parser.add_argument("--mean-output-tokens", type=int, default=128)

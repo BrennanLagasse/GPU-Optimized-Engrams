@@ -13,6 +13,7 @@ set -euo pipefail
 #   BATCH_SIZE=4 bash scripts/run_cluster_serving_scheduling.sh
 #   MODEL_IMPL=naive POLICY=random OUTPUT=results/serving_scheduling_target_40b_naive_random.json bash scripts/run_cluster_serving_scheduling.sh
 #   MODEL_IMPL=cached_full_engram POLICY=random OUTPUT=results/serving_scheduling_target_40b_cached_full_random.json bash scripts/run_cluster_serving_scheduling.sh
+#   DECODE_MODE=compact POLICY=longest_input_first OUTPUT=results/serving_scheduling_target_40b_compact.json bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=fifo bash scripts/run_cluster_serving_scheduling.sh
 #   POLICY=longest_output_first OUTPUT=results/serving_scheduling_target_40b_oracle_output.json bash scripts/run_cluster_serving_scheduling.sh
 #   REPLICA_ASSIGNMENT=greedy_prefill bash scripts/run_cluster_serving_scheduling.sh
@@ -26,6 +27,7 @@ MODEL_IMPL="${MODEL_IMPL:-optimized_cached}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 POLICY="${POLICY:-longest_input_first}"
 REPLICA_ASSIGNMENT="${REPLICA_ASSIGNMENT:-round_robin}"
+DECODE_MODE="${DECODE_MODE:-static}"
 NUM_REQUESTS="${NUM_REQUESTS:-100}"
 MEAN_INPUT_TOKENS="${MEAN_INPUT_TOKENS:-128}"
 MEAN_OUTPUT_TOKENS="${MEAN_OUTPUT_TOKENS:-128}"
@@ -58,6 +60,7 @@ cmd=(
   --batch-size "${BATCH_SIZE}"
   --policy "${POLICY}"
   --replica-assignment "${REPLICA_ASSIGNMENT}"
+  --decode-mode "${DECODE_MODE}"
   --num-requests "${NUM_REQUESTS}"
   --mean-input-tokens "${MEAN_INPUT_TOKENS}"
   --mean-output-tokens "${MEAN_OUTPUT_TOKENS}"

@@ -43,6 +43,8 @@ Schedulers:
 - `longest_input_first`: realistic input-known scheduler. It does not use output lengths.
 - `longest_output_first`: oracle scheduler. It uses true output lengths and is not deployable, but provides an upper bound.
 
+The oracle scheduler cannot be used in a realistic serving scenario because the server does not know actual output lengths before generation starts. It only learns that a request is complete after that request emits an end condition, such as EOS or a configured max-token limit. Therefore, oracle results should be read as an upper-bound diagnostic for decode-length heterogeneity, not as a deployable scheduling policy.
+
 ## Main Serving Results
 
 | Case | Serving seconds | Serving tok/s |
@@ -125,6 +127,5 @@ Best realistic result:
 ## Recommended Next Work
 
 - Implement dynamic batching or active-row compaction so completed rows stop consuming decode steps in static batches.
-- Explore output-length prediction or online decode-progress heuristics as realistic approximations to the oracle scheduler.
 - Test continuous batching with larger request counts and arrival processes, not just a fixed 100-request batch.
 - Keep Engram `step_kernel` in the optimized path because it is exact and helps smaller microbenchmarks, but do not present it as the driver of 40B serving speedup.
