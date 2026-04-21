@@ -676,3 +676,27 @@
   - full realistic bundle effect
   - oracle scheduler effects
   - greedy replica-assignment effects
+
+## 2026-04-21 17:58 EDT
+
+- Completed the target-scale serving ablation matrix on `gpu003` (`8 x NVIDIA H200`) for the 100-request `target_40b_approx` workload.
+- Added [results/serving_ablation_matrix_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_ablation_matrix_report_2026-04-21.md).
+- Key serving wall times excluding model load:
+  - naive + random: `4882.758s`
+  - naive + longest_input_first: `3629.573s`
+  - naive + oracle longest_output_first: `3271.340s`
+  - optimized_cached + random: `192.714s`
+  - optimized_cached + longest_input_first + round_robin: `165.990s`
+  - optimized_cached + longest_input_first + greedy_prefill: `168.879s`
+  - optimized_cached + oracle + round_robin: `119.568s`
+  - optimized_cached + oracle + greedy_oracle: `109.873s`
+- Attribution:
+  - realistic scheduler only on naive: `1.35x`, `25.67%` serving-time reduction
+  - optimized model only under random scheduling: `25.34x`, `96.05%` serving-time reduction
+  - realistic scheduler on optimized model: `1.16x`, `13.87%` serving-time reduction
+  - full realistic bundle: `29.42x`, `96.60%` serving-time reduction
+  - oracle scheduler on optimized model: `1.61x`, `37.96%` serving-time reduction
+  - oracle scheduler plus oracle replica assignment: `1.75x`, `42.99%` serving-time reduction
+- Optimization result:
+  - realistic `greedy_prefill` replica assignment did not improve makespan for this deterministic workload; it was `1.74%` slower than round-robin after input-known scheduling.
+  - oracle `greedy_oracle` replica assignment improved optimized oracle serving time by `8.11%`, but it is not deployable because it uses true output lengths.
