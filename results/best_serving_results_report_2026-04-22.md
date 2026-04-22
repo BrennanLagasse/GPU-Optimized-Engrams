@@ -178,7 +178,17 @@ This is a modest incremental improvement over the already-optimized B8 static re
 
 ## What Each Methodological Choice Means
 
-### `naive`
+The benchmark has three separate categories of choices:
+
+- model implementation: what code path computes logits
+- scheduler: how requests are ordered and assigned to batches/replicas
+- decoder/runtime mode: how finished rows are handled during generation
+
+These categories should not be compared as alternatives to each other. For example, `optimized_cached` is a model implementation, while `longest_input_first` is a scheduler. The best result combines one choice from each category.
+
+### Model Implementation Choices
+
+#### `naive`
 
 The naive implementation is the correctness-oriented baseline. It recomputes the model over the full context during generation. It is intentionally not optimized for serving speed.
 
@@ -188,9 +198,23 @@ Purpose:
 - helps validate optimized implementation parity
 - makes the cost of missing KV-cache reuse visible
 
-### `optimized_cached`
+#### `optimized_cached`
 
-The optimized implementation uses cached inference, optimized Engram/mHC paths, and model-parallel placement. In serving, the most important improvement is avoiding full-context recomputation during decoding.
+The optimized implementation uses the same high-level model behavior as the naive implementation, but changes the inference runtime. The most important optimization is cached incremental decode: instead of recomputing the whole context at every generated token, attention layers reuse cached keys/values and process only the new token during steady-state decode.
+
+Optimizations included relative to `naive`:
+
+- KV-cached incremental attention for decode.
+- `torch.inference_mode()` around generation/benchmark paths to remove autograd overhead.
+- Tensorized Engram hash preparation paths, including cached last-token hash preparation during decode.
+- Per-device Engram hash preparation for model-parallel placement so Engram blocks receive hashes on the right device.
+- Exact cached Engram `ShortConv.forward_step()` path, also called the Engram `step_kernel`, for single-token cached decode.
+- Model-parallel execution via `device_map`, with contiguous layer placement across GPU groups.
+- Stage-aware execution to avoid redundant device transfers across blocks already on the same device.
+- Weighted contiguous placement heuristics that account for Engram-heavy early blocks.
+- mHC execution in the optimized model path with the same `hc_mult=4` structure used for the target preset.
+
+The target-scale ablations show that the dominant speedup comes from generic KV-cached incremental decode, not from the Engram-specific `step_kernel`. The Engram-specific cached step is exact and kept in the optimized path, but its end-to-end contribution at 40B serving scale is small.
 
 Purpose:
 
@@ -198,7 +222,15 @@ Purpose:
 - preserves correctness against the naive implementation in tests
 - enables target-scale 40B-class experiments
 
-### `random`
+Related up-to-date references:
+
+- [cached_engram_ablation_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/cached_engram_ablation_report_2026-04-21.md)
+- [proposal_checklist.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/proposal_checklist.md)
+- [paper_metrics_summary.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/paper_metrics_summary.md)
+
+### Scheduler Choices
+
+#### `random`
 
 Random scheduling is the intentionally weak baseline. It does not use input length, output length, or any workload structure.
 
@@ -207,7 +239,7 @@ Purpose:
 - shows what happens without request-aware scheduling
 - gives a conservative baseline for measuring scheduling improvements
 
-### `longest_input_first`
+#### `longest_input_first`
 
 This policy sorts by known input length. It is realistic because a server knows prompt length before prefill.
 
@@ -217,9 +249,9 @@ Purpose:
 - keeps long prompts grouped together
 - avoids using unavailable output-length information
 
-### `longest_output_first`
+#### `longest_output_first`
 
-This policy sorts by true output length. It is not deployable in a realistic serving system because the output length is only known after generation finishes.
+This policy sorts by true output length. It is not deployable in a realistic serving system because the output length is only known after generation finishes. It is useful as an oracle diagnostic because it batches responses of similar length together, reducing decode padding in static batches.
 
 Purpose:
 
@@ -227,7 +259,9 @@ Purpose:
 - helps estimate how much static-batch waste comes from decode-length imbalance
 - should not be presented as a realistic production result
 
-### `static` Decode
+### Decoder/Runtime Choices
+
+#### `static` Decode
 
 Static decode keeps every row in a batch alive until the longest request in that batch finishes. This is simple and efficient for fixed tensor shapes, but it performs padded decode work for rows that are already complete.
 
@@ -237,7 +271,7 @@ Purpose:
 - high GPU utilization
 - exposes padding waste in heterogeneous workloads
 
-### `compact` Decode
+#### `compact` Decode
 
 Compact decode removes rows after they complete and compacts model caches with the remaining active row indices. This is realistic because it only uses completion information observed online.
 
@@ -253,68 +287,73 @@ For B8, compact was slower than static. For B16, compact became the best result 
 
 ### Main Attribution Matrix
 
-| Comparison | Serving seconds | Speedup | Serving-time reduction | Interpretation |
-| --- | ---: | ---: | ---: | --- |
-| Naive random static -> optimized random static | `4882.758 -> 192.714` | `25.34x` | `96.05%` | Model-path optimization dominates the total speedup. |
-| Optimized random static -> optimized input-known static | `192.714 -> 165.990` | `1.16x` | `13.87%` | Realistic input-aware scheduling matters. |
-| Optimized input-known static B8 -> optimized input-known compact B16 | `165.990 -> 163.306` | `1.016x` | `1.62%` | B16 compaction adds a small final gain. |
-| Naive random static -> best realistic result | `4882.758 -> 163.306` | `29.90x` | `96.66%` | Full realistic optimized bundle. |
+| Comparison | Before model | Before scheduler | Before decoder | Before batch | After model | After scheduler | After decoder | After batch | Serving seconds | Speedup | Serving-time reduction | Interpretation |
+| --- | --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Model path | `naive` | `random` | `static` | 8 | `optimized_cached` | `random` | `static` | 8 | `4882.758 -> 192.714` | `25.34x` | `96.05%` | Model-path optimization dominates the total speedup. |
+| Realistic scheduler | `optimized_cached` | `random` | `static` | 8 | `optimized_cached` | `longest_input_first` | `static` | 8 | `192.714 -> 165.990` | `1.16x` | `13.87%` | Reducing prefill padding gives a clear gain. |
+| B16 compaction | `optimized_cached` | `longest_input_first` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 16 | `165.990 -> 163.306` | `1.016x` | `1.62%` | Larger batch plus compaction adds a small final gain. |
+| Full realistic bundle | `naive` | `random` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 16 | `4882.758 -> 163.306` | `29.90x` | `96.66%` | Combined model, scheduler, and decoder/runtime result. |
 
 ### Scheduler Ablation
 
 At B8 static:
 
-| Case | Serving seconds | Tok/s |
-| --- | ---: | ---: |
-| `optimized_cached + random` | `192.714` | `66.420` |
-| `optimized_cached + longest_input_first` | `165.990` | `77.113` |
-| `optimized_cached + longest_output_first` oracle | `119.568` | `107.052` |
-| `optimized_cached + longest_output_first + greedy_oracle` oracle | `109.873` | `116.498` |
+| Model | Scheduler | Replica assignment | Decoder | Batch/replica | Serving seconds | Tok/s | Speedup vs optimized random | Serving-time reduction |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `optimized_cached` | `random` | `round_robin` | `static` | 8 | `192.714` | `66.420` | `1.00x` | `0.00%` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 8 | `165.990` | `77.113` | `1.16x` | `13.87%` |
+| `optimized_cached` | `longest_output_first` oracle | `round_robin` | `static` | 8 | `119.568` | `107.052` | `1.61x` | `37.96%` |
+| `optimized_cached` | `longest_output_first` oracle | `greedy_oracle` | `static` | 8 | `109.873` | `116.498` | `1.75x` | `42.99%` |
 
 Interpretation:
 
-- Realistic input-known scheduling improves serving time by `13.87%` on the optimized model.
-- Oracle output-length scheduling is much stronger, but not deployable.
-- The oracle result shows that output-length imbalance is a real source of waste, but the true output length is unavailable in realistic generation.
+- Realistic input-known scheduling improves serving time by `13.87%` on the optimized model, which suggests reducing prefill padding is valuable.
+- Moving from input-known scheduling to oracle output-length scheduling reduces serving time from `165.990s` to `119.568s`, a further `27.97%` reduction. This suggests reducing decode padding can be similarly important or even larger for this workload.
+- Oracle output-length scheduling is stronger because responses of similar length are batched together, which reduces padded decode work.
+- The oracle result is not deployable because true output length is unavailable before generation completes.
 
 ### Generic Cache vs Engram-Specific Step Kernel
 
 The cached Engram ablation separated generic KV-cached serving from the Engram-specific cached `step_kernel`.
 
-| Comparison | Serving seconds | Speedup | Serving-time reduction |
-| --- | ---: | ---: | ---: |
-| Naive input-known -> cached full Engram input-known | `3629.573 -> 167.351` | `21.69x` | `95.39%` |
-| Cached full Engram input-known -> optimized cached input-known | `167.351 -> 165.990` | `1.01x` | `0.81%` |
+| Comparison | Before model | Scheduler | Decoder | Batch/replica | After model | Serving seconds | Speedup | Serving-time reduction |
+| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: |
+| Generic cache, random scheduler | `naive` | `random` | `static` | 8 | `cached_full_engram` | `4882.758 -> 191.678` | `25.47x` | `96.07%` |
+| Engram step-kernel, random scheduler | `cached_full_engram` | `random` | `static` | 8 | `optimized_cached` | `191.678 -> 192.714` | `0.99x` | `-0.54%` |
+| Generic cache, input-known scheduler | `naive` | `longest_input_first` | `static` | 8 | `cached_full_engram` | `3629.573 -> 167.351` | `21.69x` | `95.39%` |
+| Engram step-kernel, input-known scheduler | `cached_full_engram` | `longest_input_first` | `static` | 8 | `optimized_cached` | `167.351 -> 165.990` | `1.01x` | `0.81%` |
 
 Interpretation:
 
 - Most of the 40B serving gain comes from generic cached serving, not Engram-specific micro-optimization.
 - The Engram `step_kernel` is exact and useful, but in this end-to-end batched benchmark its contribution is small.
+- The apparent discrepancy between `25.34x` in the main attribution matrix and `21.69x` here is due to different scheduler settings. Under random scheduling, generic cached serving gives `25.47x`, matching the `25.34x` optimized random model-path result up to the small Engram step-kernel difference. Under input-known scheduling, the naive baseline is already faster, so the generic-cache ratio is smaller at `21.69x`.
 
 ### Static vs Compact
 
-| Case | Static seconds | Compact seconds | Decode tokens static | Decode tokens compact | Result |
-| --- | ---: | ---: | ---: | ---: | --- |
-| naive random B8 | `4882.758` | `1079.463` | `43,584` | `12,800` | Compact greatly helps naive. |
-| optimized input-known B8 | `165.990` | `182.102` | `42,596` | `12,800` | Compact hurts at B8. |
-| optimized input-known B16 | `183.841` | `163.306` | `59,660` | `12,800` | Compact wins at B16. |
+| Model | Scheduler | Batch/replica | Static seconds | Compact seconds | Static decode tokens | Compact decode tokens | Result |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `naive` | `random` | 8 | `4882.758` | `1079.463` | `43,584` | `12,800` | Compact greatly helps naive. |
+| `optimized_cached` | `longest_input_first` | 8 | `165.990` | `182.102` | `42,596` | `12,800` | Compact hurts at B8. |
+| `optimized_cached` | `longest_input_first` | 16 | `183.841` | `163.306` | `59,660` | `12,800` | Compact wins at B16. |
 
 Interpretation:
 
-- Compact always reduces executed decode work to the requested token count.
+- Compact always reduces executed decode work to the requested token count, but reducing executed work does not always reduce serving time.
 - For optimized cached inference, the overhead of cache compaction can outweigh saved compute at smaller batches.
 - At B16, static padding waste grows enough that compaction becomes beneficial.
+- The most likely reason compact is slower at B8 is that optimized cached per-token compute is already relatively cheap. Per-step row filtering, cache `index_select`, dynamic tensor shape changes, and extra synchronization/memory movement across model-parallel devices can cost more than the decode work saved. The naive model still benefits because full-context recomputation is so expensive that removing padded rows dominates the compaction overhead.
 
 ### Batch Size Sweep
 
-| Case | Decode | Batch/replica | Serving seconds | Tok/s |
-| --- | --- | ---: | ---: | ---: |
-| optimized input B1 | static | 1 | `253.385` | `50.516` |
-| optimized input B2 | static | 2 | `231.256` | `55.350` |
-| optimized input B4 | static | 4 | `176.799` | `72.399` |
-| optimized input B8 | static | 8 | `165.990` | `77.113` |
-| optimized input B16 | static | 16 | `183.841` | `69.625` |
-| optimized input B16 | compact | 16 | `163.306` | `78.381` |
+| Model | Scheduler | Decoder | Batch/replica | Serving seconds | Tok/s |
+| --- | --- | --- | ---: | ---: | ---: |
+| `optimized_cached` | `longest_input_first` | `static` | 1 | `253.385` | `50.516` |
+| `optimized_cached` | `longest_input_first` | `static` | 2 | `231.256` | `55.350` |
+| `optimized_cached` | `longest_input_first` | `static` | 4 | `176.799` | `72.399` |
+| `optimized_cached` | `longest_input_first` | `static` | 8 | `165.990` | `77.113` |
+| `optimized_cached` | `longest_input_first` | `static` | 16 | `183.841` | `69.625` |
+| `optimized_cached` | `longest_input_first` | `compact` | 16 | `163.306` | `78.381` |
 
 Interpretation:
 
@@ -322,22 +361,24 @@ Interpretation:
 - B8 static is a strong utilization/padding tradeoff.
 - B16 static over-pads decode.
 - B16 compact recovers enough decode waste to become the best measured realistic configuration.
+- We did not run B32 or larger static/compact sweeps, so the report should not claim that B16 compact is the global optimum over all batch sizes. It is the best measured configuration so far. Larger batches might improve GPU utilization further, but they also increase prefill padding, decode padding, memory pressure, and per-step active-row management cost. A B32/B64 static-vs-compact sweep is a reasonable future experiment if more cluster time is available.
 
 ### Continuous Refill
 
 Continuous refill was implemented and measured after the best compact result.
 
-| Case | Serving seconds | Tok/s | Delta vs best compact |
-| --- | ---: | ---: | ---: |
-| continuous B8, `longest_input_first` | `167.398` | `76.464` | `2.51% slower` |
-| continuous B16, `longest_input_first` | `164.889` | `77.628` | `0.97% slower` |
-| continuous B16, oracle `longest_output_first` | `216.314` | `59.173` | `32.46% slower` |
+| Model | Scheduler | Decoder | Batch/replica | Serving seconds | Tok/s | Delta vs best compact |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `optimized_cached` | `longest_input_first` | `continuous` | 8 | `167.398` | `76.464` | `2.51% slower` |
+| `optimized_cached` | `longest_input_first` | `continuous` | 16 | `164.889` | `77.628` | `0.97% slower` |
+| `optimized_cached` | `longest_output_first` oracle | `continuous` | 16 | `216.314` | `59.173` | `32.46% slower` |
 
 Interpretation:
 
 - Continuous refill is now implemented and benchmarkable.
 - It did not beat B16 compact on this closed 100-request workload.
-- Likely causes are exact per-request prefill, slot-indexed cache overhead, Engram short-conv slot state, and Python scheduler bookkeeping.
+- Likely causes are exact per-request prefill, slot-indexed cache overhead, Engram short-conv slot state, and Python scheduler bookkeeping. Unlike compact static batches, continuous refill admits new requests one slot at a time, which reduces padding but gives up some batched prefill efficiency and adds per-request cache-management overhead.
+- The oracle continuous result is worse because output-length sorting harms input-length locality and therefore prefill efficiency; in this workload, that cost outweighed the decode-padding benefit.
 - This does not invalidate continuous batching generally; it means this implementation and workload did not improve over the simpler best compact path.
 
 ## Assumptions And Limitations
