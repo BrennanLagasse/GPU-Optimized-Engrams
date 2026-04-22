@@ -897,3 +897,28 @@
 - Remaining validation needed:
   - run the 40B H200 continuous cases from the cluster after pushing this branch
   - compare continuous B8/B16 against the current best measured B16 compact result
+
+## 2026-04-22 13:10 EDT
+
+- Ran the implemented continuous-refill serving path on the H200 cluster.
+- Hardware/model:
+  - `gpu003`
+  - `8 x NVIDIA H200`, two model-parallel replicas over devices `0,1,2,3` and `4,5,6,7`
+  - preset `target_40b_approx`
+  - approximate params: `39,978,323,440` (`~39.98B`)
+  - dtype `bfloat16`
+  - workload: `100` requests, mean input/output `128`, max input/output `1024`, deterministic long-tailed lengths, total requested output `12,800`
+- Results:
+  - realistic continuous B8, `longest_input_first`: `167.398s`, `76.464 tok/s`
+  - realistic continuous B16, `longest_input_first`: `164.889s`, `77.628 tok/s`
+  - oracle continuous B16, `longest_output_first`: `216.314s`, `59.173 tok/s`
+- Comparison:
+  - prior best realistic measured case remains `optimized_cached + longest_input_first + compact + BATCH_SIZE=16` at `163.306s`
+  - realistic continuous B16 is `0.97%` slower than that prior best
+  - realistic continuous B8 is `2.51%` slower than that prior best
+  - continuous B16 is still about `29.61x` faster than the original naive random static baseline (`4882.758s`)
+- Interpretation:
+  - implemented continuous refill is correct enough to benchmark, but it does not beat the best compact path on this fixed 100-request closed workload
+  - exact per-request prefill and slot-indexed cache overhead offset the saved decode padding
+  - oracle continuous is worse here because sorting by output length degrades the input-length/prefill locality that dominates this workload
+- Fixed `scripts/report_serving_optimization_sweep.py` to skip non-dict helper JSON files such as `.replica*.batches.json`.

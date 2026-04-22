@@ -30,6 +30,8 @@ def executed_decode_tokens(data: dict) -> int:
 
 def summarize_file(path: Path) -> dict:
     data = load(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a benchmark object")
     if data.get("mode") != "coordinator":
         raise ValueError(f"{path} is not a coordinator benchmark output")
     summary = data.get("schedule_summary", {})
