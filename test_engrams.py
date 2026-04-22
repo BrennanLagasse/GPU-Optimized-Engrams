@@ -7,6 +7,7 @@ from engrams_kv_moe import (
     CompressedTokenizer,
     EngramConfig,
     EngramsModel,
+    MultiHeadAttention,
     MultiHeadEmbedding,
     NgramHashMapping,
     ShortConv,
@@ -219,6 +220,98 @@ def test_generate_with_and_without_cache_match():
     with_cache = generate_text(model, input_ids, max_new_tokens=4, context_size=32, use_cache=True)
 
     assert torch.equal(no_cache, with_cache)
+
+
+def test_attention_per_row_cache_positions_allow_slot_refill():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "context_length": 16,
+        "emb_dim": 16,
+        "n_heads": 4,
+        "drop_rate": 0.0,
+        "qkv_bias": False,
+    })
+    attn = MultiHeadAttention(config)
+    attn.eval()
+
+    continuing = torch.randn(4, config["emb_dim"])
+    initial = torch.randn(2, config["emb_dim"])
+    refill = torch.randn(2, config["emb_dim"])
+
+    with torch.inference_mode():
+        continuing_full = attn(continuing.unsqueeze(0), use_cache=False)
+        initial_full = attn(initial.unsqueeze(0), use_cache=False)
+        refill_full = attn(refill.unsqueeze(0), use_cache=False)
+
+        attn.reset_cache()
+        step0 = torch.stack([continuing[0], initial[0]], dim=0).unsqueeze(1)
+        out0 = attn(step0, use_cache=True, cache_positions=torch.tensor([0, 0]))
+        step1 = torch.stack([continuing[1], initial[1]], dim=0).unsqueeze(1)
+        out1 = attn(step1, use_cache=True, cache_positions=torch.tensor([1, 1]))
+
+        attn.reset_cache_rows(torch.tensor([1]))
+        step2 = torch.stack([continuing[2], refill[0]], dim=0).unsqueeze(1)
+        out2 = attn(step2, use_cache=True, cache_positions=torch.tensor([2, 0]))
+        step3 = torch.stack([continuing[3], refill[1]], dim=0).unsqueeze(1)
+        out3 = attn(step3, use_cache=True, cache_positions=torch.tensor([3, 1]))
+
+    assert torch.allclose(out0[0, 0], continuing_full[0, 0], atol=1e-5)
+    assert torch.allclose(out0[1, 0], initial_full[0, 0], atol=1e-5)
+    assert torch.allclose(out1[0, 0], continuing_full[0, 1], atol=1e-5)
+    assert torch.allclose(out1[1, 0], initial_full[0, 1], atol=1e-5)
+    assert torch.allclose(out2[0, 0], continuing_full[0, 2], atol=1e-5)
+    assert torch.allclose(out2[1, 0], refill_full[0, 0], atol=1e-5)
+    assert torch.allclose(out3[0, 0], continuing_full[0, 3], atol=1e-5)
+    assert torch.allclose(out3[1, 0], refill_full[0, 1], atol=1e-5)
+
+
+def test_model_per_row_cache_positions_allow_slot_refill_no_engrams():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 64,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "drop_rate": 0.0,
+        "layer_ids": [],
+        "hc_mult": 1,
+    })
+    model = EngramsModel(config)
+    model.eval()
+
+    continuing = torch.randint(0, config["vocab_size"], (1, 4), dtype=torch.long)
+    initial = torch.randint(0, config["vocab_size"], (1, 2), dtype=torch.long)
+    refill = torch.randint(0, config["vocab_size"], (1, 2), dtype=torch.long)
+
+    with torch.inference_mode():
+        continuing_full = model(continuing, use_cache=False, position_offset=0)
+        initial_full = model(initial, use_cache=False, position_offset=0)
+        refill_full = model(refill, use_cache=False, position_offset=0)
+
+        model.reset_cache()
+        step0 = torch.stack([continuing[0, 0], initial[0, 0]], dim=0).unsqueeze(1)
+        out0 = model(step0, use_cache=True, cache_positions=torch.tensor([0, 0]))
+        step1 = torch.stack([continuing[0, 1], initial[0, 1]], dim=0).unsqueeze(1)
+        out1 = model(step1, use_cache=True, cache_positions=torch.tensor([1, 1]))
+
+        model.reset_cache_rows(torch.tensor([1]))
+        step2 = torch.stack([continuing[0, 2], refill[0, 0]], dim=0).unsqueeze(1)
+        out2 = model(step2, use_cache=True, cache_positions=torch.tensor([2, 0]))
+        step3 = torch.stack([continuing[0, 3], refill[0, 1]], dim=0).unsqueeze(1)
+        out3 = model(step3, use_cache=True, cache_positions=torch.tensor([3, 1]))
+
+    assert torch.allclose(out0[0, 0], continuing_full[0, 0], atol=1e-5)
+    assert torch.allclose(out0[1, 0], initial_full[0, 0], atol=1e-5)
+    assert torch.allclose(out1[0, 0], continuing_full[0, 1], atol=1e-5)
+    assert torch.allclose(out1[1, 0], initial_full[0, 1], atol=1e-5)
+    assert torch.allclose(out2[0, 0], continuing_full[0, 2], atol=1e-5)
+    assert torch.allclose(out2[1, 0], refill_full[0, 0], atol=1e-5)
+    assert torch.allclose(out3[0, 0], continuing_full[0, 3], atol=1e-5)
+    assert torch.allclose(out3[1, 0], refill_full[0, 1], atol=1e-5)
 
 
 def test_weighted_device_map_is_contiguous_and_biases_engram_heavy_front_block():

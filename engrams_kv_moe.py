@@ -335,6 +335,11 @@ class ShortConv(nn.Module):
     def reset_cache(self):
         self.cache_x_norm = None
 
+    def reset_cache_rows(self, row_indices: torch.Tensor):
+        if self.cache_x_norm is not None:
+            indices = row_indices.to(device=self.cache_x_norm.device, dtype=torch.long)
+            self.cache_x_norm[indices] = 0
+
     def compact_cache(self, active_indices: torch.Tensor):
         if self.cache_x_norm is not None:
             indices = active_indices.to(device=self.cache_x_norm.device, dtype=torch.long)
@@ -846,6 +851,10 @@ class Engram(nn.Module):
         if self.short_conv is not None:
             self.short_conv.reset_cache()
 
+    def reset_cache_rows(self, row_indices: torch.Tensor):
+        if self.short_conv is not None:
+            self.short_conv.reset_cache_rows(row_indices)
+
     def compact_cache(self, active_indices: torch.Tensor):
         if self.short_conv is not None:
             self.short_conv.compact_cache(active_indices)
@@ -870,12 +879,14 @@ class MultiHeadAttention(nn.Module):
 
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
+        self.register_buffer("cache_lengths", None, persistent=False)
         self.ptr_current_pos = 0
         self.cache_capacity = config["context_length"]
 
-    def _ensure_cache_capacity(self, keys_new, values_new):
+    def _ensure_cache_capacity(self, keys_new, values_new, required=None):
         batch_size, num_tokens, _, _ = keys_new.shape
-        required = self.ptr_current_pos + num_tokens
+        if required is None:
+            required = self.ptr_current_pos + num_tokens
         capacity = max(self.cache_capacity, required)
 
         needs_realloc = (
@@ -899,15 +910,63 @@ class MultiHeadAttention(nn.Module):
         )
         new_v = torch.empty_like(new_k)
 
-        if self.cache_k is not None and self.ptr_current_pos > 0:
-            prefix = self.ptr_current_pos
-            new_k[:, :prefix] = self.cache_k[:, :prefix]
-            new_v[:, :prefix] = self.cache_v[:, :prefix]
+        if self.cache_k is not None:
+            rows = min(self.cache_k.shape[0], new_k.shape[0])
+            prefix = min(self.cache_k.shape[1], new_k.shape[1])
+            new_k[:rows, :prefix] = self.cache_k[:rows, :prefix]
+            new_v[:rows, :prefix] = self.cache_v[:rows, :prefix]
 
         self.cache_k = new_k
         self.cache_v = new_v
 
-    def forward(self, x, use_cache=False):
+        if self.cache_lengths is None or self.cache_lengths.shape[0] != batch_size:
+            self.cache_lengths = torch.zeros(batch_size, device=keys_new.device, dtype=torch.long)
+        else:
+            self.cache_lengths = self.cache_lengths.to(device=keys_new.device)
+
+    def _forward_per_row_cache(self, keys_new, values_new, queries, cache_positions):
+        b, num_tokens, _, _ = keys_new.shape
+        if cache_positions.shape != (b,):
+            raise ValueError(f"cache_positions must have shape ({b},), got {tuple(cache_positions.shape)}")
+        if (cache_positions < 0).any():
+            raise ValueError("cache_positions must be non-negative")
+
+        cache_positions = cache_positions.to(device=keys_new.device, dtype=torch.long)
+        row_ends = cache_positions + num_tokens
+        required = int(row_ends.max().item()) if row_ends.numel() else num_tokens
+        self._ensure_cache_capacity(keys_new, values_new, required=required)
+
+        for row in range(b):
+            start = int(cache_positions[row].item())
+            end = start + num_tokens
+            self.cache_k[row, start:end] = keys_new[row]
+            self.cache_v[row, start:end] = values_new[row]
+            self.cache_lengths[row] = max(int(self.cache_lengths[row].item()), end)
+
+        max_end = int(self.cache_lengths.max().item()) if self.cache_lengths.numel() else required
+        keys = self.cache_k[:, :max_end].transpose(1, 2)
+        values = self.cache_v[:, :max_end].transpose(1, 2)
+        queries = queries.transpose(1, 2)
+
+        attn_scores = queries @ keys.transpose(2, 3)
+
+        q_offsets = torch.arange(num_tokens, device=queries.device, dtype=torch.long)
+        q_positions = cache_positions.unsqueeze(1) + q_offsets.unsqueeze(0)
+        k_positions = torch.arange(max_end, device=queries.device, dtype=torch.long)
+        row_lengths = self.cache_lengths.to(device=queries.device).unsqueeze(1)
+        mask_bool = (k_positions.view(1, 1, max_end) > q_positions.unsqueeze(-1)) | (
+            k_positions.view(1, 1, max_end) >= row_lengths.unsqueeze(-1)
+        )
+        attn_scores.masked_fill_(mask_bool.unsqueeze(1), -torch.inf)
+
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        context_vec = (attn_weights @ values).transpose(1, 2)
+        context_vec = context_vec.contiguous().view(b, num_tokens, self.emb_dim)
+        return self.out_proj(context_vec)
+
+    def forward(self, x, use_cache=False, cache_positions=None):
         b, num_tokens, _ = x.shape
 
         keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)
@@ -921,6 +980,8 @@ class MultiHeadAttention(nn.Module):
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
         if use_cache:
+            if cache_positions is not None:
+                return self._forward_per_row_cache(keys_new, values_new, queries, cache_positions)
             self._ensure_cache_capacity(keys_new, values_new)
             start = self.ptr_current_pos
             end = start + num_tokens
@@ -928,6 +989,10 @@ class MultiHeadAttention(nn.Module):
             self.cache_v[:, start:end] = values_new
             keys = self.cache_k[:, :end]
             values = self.cache_v[:, :end]
+            if self.cache_lengths is None or self.cache_lengths.shape[0] != b:
+                self.cache_lengths = torch.full((b,), end, device=x.device, dtype=torch.long)
+            else:
+                self.cache_lengths.fill_(end)
         else:
             keys, values = keys_new, values_new
 
@@ -978,8 +1043,14 @@ class MultiHeadAttention(nn.Module):
         return context_vec
 
     def reset_cache(self):
-        self.cache_k, self.cache_v = None, None
+        self.cache_k, self.cache_v, self.cache_lengths = None, None, None
         self.ptr_current_pos = 0
+
+    def reset_cache_rows(self, row_indices: torch.Tensor):
+        if self.cache_lengths is None:
+            return
+        indices = row_indices.to(device=self.cache_lengths.device, dtype=torch.long)
+        self.cache_lengths[indices] = 0
 
     def compact_cache(self, active_indices: torch.Tensor):
         if self.cache_k is not None:
@@ -988,6 +1059,9 @@ class MultiHeadAttention(nn.Module):
         if self.cache_v is not None:
             indices = active_indices.to(device=self.cache_v.device, dtype=torch.long)
             self.cache_v = self.cache_v.index_select(0, indices)
+        if self.cache_lengths is not None:
+            indices = active_indices.to(device=self.cache_lengths.device, dtype=torch.long)
+            self.cache_lengths = self.cache_lengths.index_select(0, indices)
 
 class MoEFeedForward(nn.Module):
     def __init__(self, cfg):
@@ -1105,7 +1179,7 @@ class TransformerBlock(nn.Module):
         else:
             self.hc_engram = None
     
-    def forward(self, input_ids, x, use_cache=False, engram_hashes=None):
+    def forward(self, input_ids, x, use_cache=False, engram_hashes=None, cache_positions=None):
         if self.hc_mult == 1:
             if x.dim() != 3:
                 raise ValueError("Expected [B, L, D] hidden states when hc_mult == 1")
@@ -1118,7 +1192,7 @@ class TransformerBlock(nn.Module):
                     use_cache=use_cache,
                 )
 
-            x = x + self.attn(self.norm2(x), use_cache)
+            x = x + self.attn(self.norm2(x), use_cache, cache_positions=cache_positions)
             x = x + self.ff(self.norm3(x))
             return x
 
@@ -1135,7 +1209,10 @@ class TransformerBlock(nn.Module):
             )
         
         # Attention + Residual Connection
-        x = self.hc_attn(x, lambda agg: self.attn(self.norm2(agg), use_cache))
+        x = self.hc_attn(
+            x,
+            lambda agg: self.attn(self.norm2(agg), use_cache, cache_positions=cache_positions),
+        )
 
         # FFN + Residual Connection
         x = self.hc_ff(x, lambda agg: self.ff(self.norm3(agg)))
@@ -1146,6 +1223,11 @@ class TransformerBlock(nn.Module):
         self.attn.reset_cache()
         if self.engram is not None:
             self.engram.reset_cache()
+
+    def reset_cache_rows(self, row_indices: torch.Tensor):
+        self.attn.reset_cache_rows(row_indices)
+        if self.engram is not None:
+            self.engram.reset_cache_rows(row_indices)
 
     def compact_cache(self, active_indices: torch.Tensor):
         self.attn.compact_cache(active_indices)
@@ -1219,7 +1301,7 @@ class EngramsModel(nn.Module):
         return hashes_by_device if hashes_by_device else None
 
     
-    def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None):
+    def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None, cache_positions=None):
         if self.block_device_map:
             input_device = self.input_device
             input_ids = move_tensor_to_device(input_ids, input_device)
@@ -1228,12 +1310,17 @@ class EngramsModel(nn.Module):
 
         # Figure out positional embeddings based on shift
         _, seq_len = input_ids.shape
-        pos_ids = torch.arange(
-            start=position_offset,
-            end=position_offset + seq_len,
-            device=input_device,
-            dtype=torch.long,
-        )
+        if cache_positions is not None:
+            cache_positions = cache_positions.to(device=input_device, dtype=torch.long)
+            pos_offsets = torch.arange(seq_len, device=input_device, dtype=torch.long)
+            pos_ids = cache_positions.unsqueeze(1) + pos_offsets.unsqueeze(0)
+        else:
+            pos_ids = torch.arange(
+                start=position_offset,
+                end=position_offset + seq_len,
+                device=input_device,
+                dtype=torch.long,
+            )
 
         token_embeds = self.token_embed(input_ids)
         pos_embeds = self.pos_embed(pos_ids)
@@ -1274,6 +1361,11 @@ class EngramsModel(nn.Module):
                     x = move_tensor_to_device(x, stage_device)
                 stage_input_ids = stage_local_inputs.get(stage["device"], engram_input_ids)
                 local_hashes = engram_hashes.get(stage["device"]) if isinstance(engram_hashes, dict) else None
+                local_cache_positions = (
+                    move_tensor_to_device(cache_positions, stage["device"])
+                    if cache_positions is not None
+                    else None
+                )
 
                 for idx in range(stage["start"], stage["end"]):
                     block = self.transformer_blocks[idx]
@@ -1282,6 +1374,7 @@ class EngramsModel(nn.Module):
                         x=x,
                         use_cache=use_cache,
                         engram_hashes=local_hashes,
+                        cache_positions=local_cache_positions,
                     )
         else:
             for block in self.transformer_blocks:
@@ -1290,6 +1383,7 @@ class EngramsModel(nn.Module):
                     x=x,
                     use_cache=use_cache,
                     engram_hashes=engram_hashes,
+                    cache_positions=cache_positions,
                 )
 
         if x.dim() == 4:
@@ -1305,6 +1399,10 @@ class EngramsModel(nn.Module):
     def reset_cache(self):
         for block in self.transformer_blocks:
             block.reset_cache()
+
+    def reset_cache_rows(self, row_indices: torch.Tensor):
+        for block in self.transformer_blocks:
+            block.reset_cache_rows(row_indices)
 
     def compact_cache(self, active_indices: torch.Tensor):
         for block in self.transformer_blocks:

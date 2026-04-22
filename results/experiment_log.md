@@ -848,3 +848,27 @@
     - static B8 compact: `157.788s`
     - static B16 compact baseline: `163.306s`
   - Interpretation: prefill/decode disaggregation is likely high-upside in a realistic arrival-process setting, but only after request-level KV metadata and KV handoff exist.
+
+## 2026-04-21 20:15 EDT
+
+- Began implementing the first blocker-unblocking item from the future serving plan: request/row-level KV-cache state.
+- Added per-row cache-position support to optimized attention:
+  - `MultiHeadAttention.forward(..., cache_positions=...)` now supports one cache position per batch row.
+  - `cache_lengths` tracks valid cached length independently for each row.
+  - `reset_cache_rows(row_indices)` clears selected rows logically so a completed request slot can be reused.
+  - stale keys remain allocated but are masked out by row length; this avoids destructive tensor reshaping in the hot path.
+- Threaded the primitive through the no-Engram model path:
+  - `EngramsModel.forward(..., cache_positions=...)` builds per-row position embeddings.
+  - `TransformerBlock.forward(..., cache_positions=...)` passes per-row positions into attention.
+  - model, block, Engram, ShortConv, and attention modules now expose `reset_cache_rows(...)`.
+- Added correctness tests:
+  - attention-level slot refill test
+  - no-Engram model-level slot refill test comparing cached per-row decode against full-context logits
+- Validation:
+  - `python -m py_compile engrams_kv_moe.py test_engrams.py`
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py -k "per_row_cache_positions or model_per_row_cache_positions or generate_with_and_without_cache_match"`: `4 passed, 19 deselected`
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py`: `23 passed in 77.91s`
+- Scope limitation:
+  - this is not yet full continuous batching, paged KV, or prefill/decode disaggregation
+  - Engram hash/window state still needs request-level handling before Engram-enabled slot refill can be claimed correct
+  - the implementation currently supports same-step width across active rows; an active-slot scheduler still needs to call it with the correct slot metadata
