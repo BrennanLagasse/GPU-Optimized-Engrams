@@ -159,8 +159,8 @@ def serve_static_batch_optimized(
     )
     model.reset_cache()
     sync_device(device)
-    start = time.perf_counter()
     executed_decode_tokens = 0
+    prefill_start = time.perf_counter()
     with torch.inference_mode():
         logits = model(
             input_ids,
@@ -174,6 +174,9 @@ def serve_static_batch_optimized(
             [input_ids[:, -max(config["engrams_cfg"].max_ngram_size - 1, 1) :], next_idx],
             dim=1,
         )
+        sync_device(device)
+        prefill_seconds = time.perf_counter() - prefill_start
+        decode_start = time.perf_counter()
         generated = 1
         if decode_mode == "compact":
             active = torch.nonzero(output_lengths > generated, as_tuple=False).flatten()
@@ -209,7 +212,8 @@ def serve_static_batch_optimized(
                 engram_window = engram_window.index_select(0, active)
                 output_lengths = output_lengths.index_select(0, active)
     sync_device(device)
-    seconds = time.perf_counter() - start
+    decode_seconds = time.perf_counter() - decode_start
+    seconds = prefill_seconds + decode_seconds
     return {
         "batch_id": batch.batch_id,
         "replica_id": batch.replica_id,
@@ -221,6 +225,8 @@ def serve_static_batch_optimized(
         "padded_prefill_tokens": batch.padded_prefill_tokens,
         "padded_decode_tokens": batch.padded_decode_tokens,
         "executed_decode_tokens": executed_decode_tokens,
+        "prefill_seconds": prefill_seconds,
+        "decode_seconds": decode_seconds,
         "seconds": seconds,
     }
 
