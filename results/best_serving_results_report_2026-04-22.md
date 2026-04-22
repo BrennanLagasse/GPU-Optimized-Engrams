@@ -1,20 +1,21 @@
 # Best Serving Results Report
 
-Timestamp: 2026-04-22 13:23 EDT
+Timestamp: 2026-04-22 16:45 EDT
 
 ## Executive Summary
 
-Our best measured realistic result is a `29.90x` speedup over the naive baseline on a 100-request heterogeneous serving workload for the `target_40b_approx` model preset.
+Our best measured realistic result is a `37.07x` speedup over the naive baseline on a 100-request heterogeneous serving workload for the `target_40b_approx` model preset.
 
 Best configuration:
 
 - model implementation: `optimized_cached`
 - scheduler: `longest_input_first`
+- replica assignment: `greedy_prefill`
 - decode mode: `compact`
-- batch size per replica: `16`
+- batch size per replica: `32`
 - execution layout: two 4-GPU replicas across `8 x NVIDIA H200`
-- serving time excluding model load and worker startup: `163.306s`
-- requested output throughput: `78.381 tokens/s`
+- serving time excluding model load and worker startup: `131.728s`
+- requested output throughput: `97.170 tokens/s`
 - requested output tokens served: `12,800`
 
 Baseline:
@@ -26,7 +27,7 @@ Baseline:
 - serving time excluding model load and worker startup: `4882.758s`
 - requested output throughput: `2.621 tokens/s`
 
-The strongest result is not from one optimization alone. The dominant gain comes from moving from naive full-context recomputation to cached optimized inference. Input-aware scheduling and B16 active-row compaction provide additional measured gains.
+The strongest result is not from one optimization alone. The dominant gain comes from moving from naive full-context recomputation to cached optimized inference. Input-aware scheduling, larger B32 compact batches, and greedy-prefill replica assignment provide additional measured gains.
 
 ## Project Scope
 
@@ -126,10 +127,10 @@ Secondary metrics:
 - decode padding overhead
 - total wall seconds including worker startup, when available
 
-The headline `29.90x` is computed from serving time. The numerator is the naive baseline serving time: `naive + random + static + BATCH_SIZE=8`, measured at `4882.758s`. The denominator is the best realistic optimized serving time: `optimized_cached + longest_input_first + compact + BATCH_SIZE=16`, measured at `163.306s`.
+The headline `37.07x` is computed from serving time. The numerator is the naive baseline serving time: `naive + random + round_robin + static + BATCH_SIZE=8`, measured at `4882.758s`. The denominator is the best realistic optimized serving time: `optimized_cached + longest_input_first + greedy_prefill + compact + BATCH_SIZE=32`, measured at `131.728s`.
 
 ```text
-4882.758s / 163.306s = 29.90x
+4882.758s / 131.728s = 37.07x
 ```
 
 ## Reproduction Command
@@ -139,10 +140,10 @@ Best measured realistic configuration:
 ```bash
 MODEL_IMPL=optimized_cached \
 POLICY=longest_input_first \
+REPLICA_ASSIGNMENT=greedy_prefill \
 DECODE_MODE=compact \
-BATCH_SIZE=16 \
-REPLICA_ASSIGNMENT=round_robin \
-OUTPUT=results/serving_opt_sweep_optimized_input_compact_b16_repeat1.json \
+BATCH_SIZE=32 \
+OUTPUT=results/serving_opt_sweep_optimized_input_compact_b32_greedy_prefill.json \
 bash scripts/run_cluster_serving_scheduling.sh
 ```
 
@@ -162,26 +163,28 @@ SEED=0
 
 ## Best Result Table
 
-| Case | Model | Scheduler | Decode | Batch/replica | Serving seconds | Requested tok/s | Speedup vs naive random static |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Best realistic | `optimized_cached` | `longest_input_first` | `compact` | 16 | `163.306` | `78.381` | `29.90x` |
-| Previous best realistic | `optimized_cached` | `longest_input_first` | `static` | 8 | `165.990` | `77.113` | `29.42x` |
-| Naive baseline | `naive` | `random` | `static` | 8 | `4882.758` | `2.621` | `1.00x` |
+| Case | Model | Scheduler | Replica assignment | Decode | Batch/replica | Serving seconds | Requested tok/s | Speedup vs naive random static | Time reduction vs naive | Change vs prior best B16 compact |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Best realistic | `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 32 | `131.728` | `97.170` | `37.07x` | `97.30%` | `19.34% faster` |
+| Prior best realistic | `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 16 | `163.306` | `78.381` | `29.90x` | `96.66%` | baseline |
+| Previous static best | `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 8 | `165.990` | `77.113` | `29.42x` | `96.60%` | `1.64% slower` |
+| Naive baseline | `naive` | `random` | `round_robin` | `static` | 8 | `4882.758` | `2.621` | `1.00x` | `0.00%` | `2889.94% slower` |
 
-The best result improves the previous best by:
+The best result improves the prior B16 compact best by:
 
 ```text
-(165.990s - 163.306s) / 165.990s = 1.62% serving-time reduction
+(163.306s - 131.728s) / 163.306s = 19.34% serving-time reduction
 ```
 
-This is a modest incremental improvement over the already-optimized B8 static result, but the full optimized bundle remains a large improvement over the naive baseline.
+This is now a material incremental improvement over the prior optimized result, and the full optimized bundle remains a large improvement over the naive baseline.
 
 ## What Each Methodological Choice Means
 
-The benchmark has three separate categories of choices:
+The benchmark has four separate categories of choices:
 
 - model implementation: what code path computes logits
 - scheduler: how requests are ordered and assigned to batches/replicas
+- replica assignment: how scheduled batches are mapped onto the two 4-GPU replicas
 - decoder/runtime mode: how finished rows are handled during generation
 
 These categories should not be compared as alternatives to each other. For example, `optimized_cached` is a model implementation, while `longest_input_first` is a scheduler. The best result combines one choice from each category.
@@ -224,9 +227,11 @@ Purpose:
 
 Related up-to-date references:
 
-- [cached_engram_ablation_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/cached_engram_ablation_report_2026-04-21.md)
-- [proposal_checklist.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/proposal_checklist.md)
-- [paper_metrics_summary.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/paper_metrics_summary.md)
+- [cached_engram_ablation_report_2026-04-21.md](cached_engram_ablation_report_2026-04-21.md)
+- [proposal_checklist.md](proposal_checklist.md)
+- [paper_metrics_summary.md](paper_metrics_summary.md)
+- [large_batch_sweep_report_2026-04-22.md](large_batch_sweep_report_2026-04-22.md)
+- [prefill_decode_stage_costs_b32_greedy_2026-04-22.md](prefill_decode_stage_costs_b32_greedy_2026-04-22.md)
 
 ### Scheduler Choices
 
@@ -259,6 +264,16 @@ Purpose:
 - helps estimate how much static-batch waste comes from decode-length imbalance
 - should not be presented as a realistic production result
 
+### Replica Assignment Choices
+
+#### `round_robin`
+
+Round-robin assigns scheduled batches alternately across the two 4-GPU replicas. It is simple, but at large batch sizes a single heavy batch can dominate makespan.
+
+#### `greedy_prefill`
+
+Greedy-prefill assigns batches using known input/prefill work. It is realistic because input lengths are known before serving. At B32 it materially improved load balance versus round-robin, reducing compact serving time from `177.720s` to `131.728s`, a `25.88%` serving-time reduction relative to B32 round-robin compact.
+
 ### Decoder/Runtime Choices
 
 #### `static` Decode
@@ -281,7 +296,7 @@ Purpose:
 - executes exactly the requested `12,800` decode-token steps
 - tests whether reduced work outweighs cache-indexing and tensor-shape overhead
 
-For B8, compact was slower than static. For B16, compact became the best result because the larger batch created enough padding waste for compaction to pay off.
+For B8, compact was slower than static. For B16, compact became better than B8 static, and the later B32 greedy-prefill compact run became the best measured result because the larger batch created enough padding waste for compaction to pay off while greedy-prefill reduced replica imbalance.
 
 ## Ablations And Attribution
 
@@ -291,8 +306,9 @@ For B8, compact was slower than static. For B16, compact became the best result 
 | --- | --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Model path | `naive` | `random` | `static` | 8 | `optimized_cached` | `random` | `static` | 8 | `4882.758 -> 192.714` | `25.34x` | `96.05%` | Model-path optimization dominates the total speedup. |
 | Realistic scheduler | `optimized_cached` | `random` | `static` | 8 | `optimized_cached` | `longest_input_first` | `static` | 8 | `192.714 -> 165.990` | `1.16x` | `13.87%` | Reducing prefill padding gives a clear gain. |
-| B16 compaction | `optimized_cached` | `longest_input_first` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 16 | `165.990 -> 163.306` | `1.016x` | `1.62%` | Larger batch plus compaction adds a small final gain. |
-| Full realistic bundle | `naive` | `random` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 16 | `4882.758 -> 163.306` | `29.90x` | `96.66%` | Combined model, scheduler, and decoder/runtime result. |
+| B16 compaction | `optimized_cached` | `longest_input_first` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 16 | `165.990 -> 163.306` | `1.016x` | `1.62%` | Larger batch plus compaction added a small gain over B8 static. |
+| B32 greedy compaction | `optimized_cached` | `longest_input_first` | `compact` | 16 | `optimized_cached` | `longest_input_first` | `compact` | 32 | `163.306 -> 131.728` | `1.24x` | `19.34%` | Larger compact batches plus greedy-prefill replica assignment improved makespan. |
+| Full realistic bundle | `naive` | `random` | `static` | 8 | `optimized_cached` | `longest_input_first` | `compact` | 32 | `4882.758 -> 131.728` | `37.07x` | `97.30%` | Combined model, scheduler, replica assignment, and decoder/runtime result. |
 
 ### Scheduler Ablation
 
@@ -331,11 +347,12 @@ Interpretation:
 
 ### Static vs Compact
 
-| Model | Scheduler | Batch/replica | Static seconds | Compact seconds | Static decode tokens | Compact decode tokens | Result |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `naive` | `random` | 8 | `4882.758` | `1079.463` | `43,584` | `12,800` | Compact greatly helps naive. |
-| `optimized_cached` | `longest_input_first` | 8 | `165.990` | `182.102` | `42,596` | `12,800` | Compact hurts at B8. |
-| `optimized_cached` | `longest_input_first` | 16 | `183.841` | `163.306` | `59,660` | `12,800` | Compact wins at B16. |
+| Model | Scheduler | Replica assignment | Batch/replica | Static seconds | Compact seconds | Static decode tokens | Compact decode tokens | Compact speedup vs static | Compact time reduction | Result |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `naive` | `random` | `round_robin` | 8 | `4882.758` | `1079.463` | `43,584` | `12,800` | `4.52x` | `77.89%` | Compact greatly helps naive. |
+| `optimized_cached` | `longest_input_first` | `round_robin` | 8 | `165.990` | `182.102` | `42,596` | `12,800` | `0.91x` | `-9.71%` | Compact hurts at B8. |
+| `optimized_cached` | `longest_input_first` | `round_robin` | 16 | `183.841` | `163.306` | `59,660` | `12,800` | `1.13x` | `11.17%` | Compact wins at B16. |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | 32 | `243.960` | `131.728` | `50,668` | `12,800` | `1.85x` | `45.97%` | Compact plus B32 greedy-prefill is best. |
 
 Interpretation:
 
@@ -346,37 +363,48 @@ Interpretation:
 
 ### Batch Size Sweep
 
-| Model | Scheduler | Decoder | Batch/replica | Serving seconds | Tok/s |
-| --- | --- | --- | ---: | ---: | ---: |
-| `optimized_cached` | `longest_input_first` | `static` | 1 | `253.385` | `50.516` |
-| `optimized_cached` | `longest_input_first` | `static` | 2 | `231.256` | `55.350` |
-| `optimized_cached` | `longest_input_first` | `static` | 4 | `176.799` | `72.399` |
-| `optimized_cached` | `longest_input_first` | `static` | 8 | `165.990` | `77.113` |
-| `optimized_cached` | `longest_input_first` | `static` | 16 | `183.841` | `69.625` |
-| `optimized_cached` | `longest_input_first` | `compact` | 16 | `163.306` | `78.381` |
+| Model | Scheduler | Replica assignment | Decoder | Batch/replica | Serving seconds | Tok/s | Speedup vs naive | Time reduction vs naive | Change vs prior best B16 compact |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 1 | `253.385` | `50.516` | `19.27x` | `94.81%` | `55.16% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 2 | `231.256` | `55.350` | `21.11x` | `95.26%` | `41.61% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 4 | `176.799` | `72.399` | `27.62x` | `96.38%` | `8.26% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 8 | `165.990` | `77.113` | `29.42x` | `96.60%` | `1.64% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 16 | `183.841` | `69.625` | `26.56x` | `96.23%` | `12.57% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 16 | `163.306` | `78.381` | `29.90x` | `96.66%` | baseline |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `static` | 32 | `359.340` | `35.621` | `13.59x` | `92.64%` | `120.04% slower` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `static` | 32 | `243.960` | `52.468` | `20.01x` | `95.00%` | `49.39% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 32 | `177.720` | `72.023` | `27.47x` | `96.36%` | `8.83% slower` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 32 | `131.728` | `97.170` | `37.07x` | `97.30%` | `19.34% faster` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 64 | `132.731` | `96.436` | `36.79x` | `97.28%` | `18.72% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 64 | `132.517` | `96.591` | `36.85x` | `97.29%` | `18.85% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `static` | 64 | `446.126` | `28.691` | `10.94x` | `90.86%` | `173.18% slower` |
 
 Interpretation:
 
 - Very small batches avoid padding but underutilize the GPUs.
 - B8 static is a strong utilization/padding tradeoff.
 - B16 static over-pads decode.
-- B16 compact recovers enough decode waste to become the best measured realistic configuration.
-- We did not run B32 or larger static/compact sweeps, so the report should not claim that B16 compact is the global optimum over all batch sizes. It is the best measured configuration so far. Larger batches might improve GPU utilization further, but they also increase prefill padding, decode padding, memory pressure, and per-step active-row management cost. A B32/B64 static-vs-compact sweep is a reasonable future experiment if more cluster time is available.
+- B16 compact recovers enough decode waste to beat B8 static.
+- B32 compact with greedy-prefill is the best measured realistic configuration.
+- B64 compact is slightly slower than B32 compact, so the measured optimum is around B32 for this fixed 100-request workload.
+- B128 was not run because B64 already decreased and `BATCH_SIZE=128` would collapse the 100-request workload into one effective batch, leaving one replica idle.
 
 ### Continuous Refill
 
 Continuous refill was implemented and measured after the best compact result.
 
-| Model | Scheduler | Decoder | Batch/replica | Serving seconds | Tok/s | Delta vs best compact |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| `optimized_cached` | `longest_input_first` | `continuous` | 8 | `167.398` | `76.464` | `2.51% slower` |
-| `optimized_cached` | `longest_input_first` | `continuous` | 16 | `164.889` | `77.628` | `0.97% slower` |
-| `optimized_cached` | `longest_output_first` oracle | `continuous` | 16 | `216.314` | `59.173` | `32.46% slower` |
+| Model | Scheduler | Replica assignment | Decoder | Batch/replica | Serving seconds | Tok/s | Speedup vs naive | Time reduction vs naive | Change vs best B32 compact |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `continuous` | 8 | `167.398` | `76.464` | `29.17x` | `96.57%` | `27.08% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `continuous` | 16 | `164.889` | `77.628` | `29.61x` | `96.62%` | `25.17% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `continuous` | 32 | `186.199` | `68.744` | `26.22x` | `96.19%` | `41.35% slower` |
+| `optimized_cached` | `longest_input_first` | `round_robin` | `continuous` | 64 | `156.372` | `81.856` | `31.23x` | `96.80%` | `18.70% slower` |
+| `optimized_cached` | `longest_output_first` oracle | `round_robin` | `continuous` | 16 | `216.314` | `59.173` | `22.57x` | `95.57%` | `64.22% slower` |
 
 Interpretation:
 
 - Continuous refill is now implemented and benchmarkable.
-- It did not beat B16 compact on this closed 100-request workload.
+- It did not beat B32 compact on this closed 100-request workload.
 - Likely causes are exact per-request prefill, slot-indexed cache overhead, Engram short-conv slot state, and Python scheduler bookkeeping. Unlike compact static batches, continuous refill admits new requests one slot at a time, which reduces padding but gives up some batched prefill efficiency and adds per-request cache-management overhead.
 - The oracle continuous result is worse because output-length sorting harms input-length locality and therefore prefill efficiency; in this workload, that cost outweighed the decode-padding benefit.
 - This does not invalidate continuous batching generally; it means this implementation and workload did not improve over the simpler best compact path.
@@ -402,23 +430,43 @@ Limitations:
 - Tensor parallelism, paged KV, and production continuous batching are not fully explored.
 - Some apparent small differences near 1% should be interpreted cautiously because cluster scheduling and GPU runtime noise can matter at that scale.
 
+## Prefill/Decode Stage-Cost Experiment
+
+The earlier architecture simulation suggested prefill/decode disaggregation could be promising, so the benchmark now records measured per-batch `prefill_seconds` and `decode_seconds` for optimized static/compact serving.
+
+For the best B32 compact greedy-prefill result:
+
+| Metric | Seconds | Relative to measured serving time |
+| --- | ---: | ---: |
+| Measured serving time | `131.728` | `1.00x` |
+| Sum of measured prefill stages | `9.574` | `0.07x` |
+| Sum of measured decode stages | `220.153` | `1.67x` |
+| Estimated staged prefill/decode pipeline | `227.832` | `1.73x` |
+
+| Baseline | Candidate | Baseline seconds | Candidate seconds | Speedup | Serving-time reduction |
+| --- | --- | ---: | ---: | ---: | ---: |
+| current best serving | staged prefill/decode estimate | `131.728` | `227.832` | `0.58x` | `-72.96%` |
+
+This measured stage-cost experiment does not support prefill/decode disaggregation as an immediate win for the fixed closed-batch workload. The workload is decode-dominated after B32 compact scheduling, and the staged estimate gives up the data-parallel benefit of two full serving replicas. Disaggregation could still matter for arrival-process workloads, TTFT, or much heavier prefill workloads, but it is not the best next optimization for the current headline benchmark.
+
 ## What We Can Claim
 
 Strong claim:
 
-- On the fixed 100-request 40B-class H200 serving benchmark, the best realistic optimized configuration is `29.90x` faster than the naive random static baseline.
+- On the fixed 100-request 40B-class H200 serving benchmark, the best realistic optimized configuration is `37.07x` faster than the naive random static baseline.
 
 More precise claim:
 
-- The best measured realistic configuration is `optimized_cached + longest_input_first + compact + BATCH_SIZE=16`, with `163.306s` serving time and `78.381 requested output tok/s`.
+- The best measured realistic configuration is `optimized_cached + longest_input_first + greedy_prefill + compact + BATCH_SIZE=32`, with `131.728s` serving time and `97.170 requested output tok/s`.
 - The benchmark uses random weights because the result is an inference-speed comparison, not a quality or accuracy claim.
 
 Attribution claim:
 
 - The largest contribution comes from cached optimized inference versus naive full-context recompute.
 - Realistic input-known scheduling contributes a meaningful additional improvement.
-- B16 active-row compaction contributes a small final improvement.
+- B32 active-row compaction with greedy-prefill replica assignment contributes a material additional improvement over the prior B16 compact result.
 - Engram-specific cached step-kernel optimization is exact but not the dominant end-to-end speedup source at 40B scale.
+- Measured prefill/decode stage-cost estimation was slower than the current best for this closed-batch workload, so disaggregation should not be presented as a current measured win.
 
 Do not claim:
 
@@ -431,6 +479,6 @@ Do not claim:
 
 The clearest way to present the result is:
 
-> We implemented a naive correctness baseline and an optimized cached Engram/mHC serving path, then benchmarked both on a deterministic 100-request long-tailed workload using a 40B-class model across 8 H200 GPUs. The best realistic configuration served 12,800 requested output tokens in 163.306 seconds, achieving a 29.90x speedup over the naive random static baseline. Ablations show that most of the speedup comes from cached optimized inference, with additional gains from input-length-aware scheduling and B16 active-row compaction.
+> We implemented a naive correctness baseline and an optimized cached Engram/mHC serving path, then benchmarked both on a deterministic 100-request long-tailed workload using a 40B-class model across 8 H200 GPUs. The best realistic configuration served 12,800 requested output tokens in 131.728 seconds, achieving a 37.07x speedup over the naive random static baseline. Ablations show that most of the speedup comes from cached optimized inference, with additional gains from input-length-aware scheduling, B32 active-row compaction, and greedy-prefill replica assignment.
 
 This statement is accurate, strong, and does not overclaim oracle or production-online serving results.

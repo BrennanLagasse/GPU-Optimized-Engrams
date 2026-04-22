@@ -2,7 +2,7 @@
 
 ## Local Results
 
-Source: [results/local_benchmarks.json](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/local_benchmarks.json)
+Source: [results/local_benchmarks.json](results/local_benchmarks.json)
 
 Hardware:
 - CPU: Apple M1 Pro
@@ -313,7 +313,7 @@ Observations:
 
 ## Target-Scale Sizing
 
-Using [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py), rough bf16 target-scale presets were fitted for the proposal target:
+Using [scripts/estimate_scale.py](scripts/estimate_scale.py), rough bf16 target-scale presets were fitted for the proposal target:
 
 | Preset | Approx params | Example backbone | Param GiB / rank (TP=8) | KV cache GiB | Activation GiB | Working-set GiB / rank |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
@@ -346,7 +346,7 @@ Representative target-scale metrics:
 | `target_40b_approx`, naive, 64-token paired run | 39.98B | 77.37 GFLOPs | `4 x H200` | n/a | n/a | 17.07 | baseline |
 
 Notes:
-- The FLOPs/token values are approximate forward-pass cached-decode estimates from [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py) at context length `64`.
+- The FLOPs/token values are approximate forward-pass cached-decode estimates from [scripts/estimate_scale.py](scripts/estimate_scale.py) at context length `64`.
 - These FLOPs/token estimates are intended as scale descriptors, not exact kernel-accounting measurements.
 - They exclude communication overhead, embedding-table memory traffic effects, framework overhead, and host/device stalls, so realized hardware utilization should be interpreted cautiously.
 - The proposal-relevant comparison is therefore best read as: "for a roughly 40B-parameter Engram+mHC model with about 77.37 GFLOPs of cached forward compute per generated token, optimized beats naive and the win shows up primarily in steady-state decode."

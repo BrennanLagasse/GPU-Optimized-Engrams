@@ -1,9 +1,9 @@
 # Proposal Checklist Review
 
 Source documents:
-- [docs/proposal/main.tex](/Users/vincentli/Desktop/GPU-Optimized-Engrams/docs/proposal/main.tex)
-- [docs/Engram_paper.pdf](/Users/vincentli/Desktop/GPU-Optimized-Engrams/docs/Engram_paper.pdf)
-- [docs/mHC- Manifold-Constrained Hyper-Connections.pdf](/Users/vincentli/Desktop/GPU-Optimized-Engrams/docs/mHC-%20Manifold-Constrained%20Hyper-Connections.pdf)
+- [docs/proposal/main.tex](docs/proposal/main.tex)
+- [docs/Engram_paper.pdf](docs/Engram_paper.pdf)
+- [docs/mHC- Manifold-Constrained Hyper-Connections.pdf](docs/mHC-%20Manifold-Constrained%20Hyper-Connections.pdf)
 
 Status legend:
 - `Complete`: implemented and validated in this repo
@@ -17,12 +17,12 @@ Status legend:
 Status: `Complete` for inference, `Partial` overall
 
 What is complete:
-- working Engram transformer backbone in [engrams_kv_moe.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/engrams_kv_moe.py)
-- separate naive baseline in [engrams_naive.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/engrams_naive.py)
+- working Engram transformer backbone in [engrams_kv_moe.py](engrams_kv_moe.py)
+- separate naive baseline in [engrams_naive.py](engrams_naive.py)
 - dense FFN and MoE code paths
 - mHC-style residual wrapper with width `hc_mult=4`
 - KV-cached optimized decoding
-- parity tests across naive/optimized overlap in [test_engrams.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/test_engrams.py)
+- parity tests across naive/optimized overlap in [test_engrams.py](test_engrams.py)
 
 What is only partial:
 - architecture is implemented for inference benchmarking, not full training
@@ -34,12 +34,12 @@ What is only partial:
 Status: `Partial`
 
 What is complete:
-- parameter and memory estimation in [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py)
+- parameter and memory estimation in [scripts/estimate_scale.py](scripts/estimate_scale.py)
 - target-scale approximate `32B` and `40B` presets
 - component profiling in:
-  - [scripts/profile_engram_components.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/profile_engram_components.py)
-  - [scripts/profile_forward_components.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/profile_forward_components.py)
-  - [scripts/profile_decode_breakdown.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/profile_decode_breakdown.py)
+  - [scripts/profile_engram_components.py](scripts/profile_engram_components.py)
+  - [scripts/profile_forward_components.py](scripts/profile_forward_components.py)
+  - [scripts/profile_decode_breakdown.py](scripts/profile_decode_breakdown.py)
 
 What is missing:
 - no THOP-based verification
@@ -54,7 +54,7 @@ What is complete:
 - one-process model-parallel execution using `device_map`
 - 32B and 40B approximate configs run on H200 cluster hardware
 - optimized beats naive at target scale for longer decode windows
-- placement sweeps and benchmark matrix tooling in [scripts/run_target_benchmark_matrix.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/run_target_benchmark_matrix.py)
+- placement sweeps and benchmark matrix tooling in [scripts/run_target_benchmark_matrix.py](scripts/run_target_benchmark_matrix.py)
 
 What is missing relative to the proposal:
 - no torch.distributed / NCCL tensor parallel implementation
@@ -103,7 +103,7 @@ Evidence:
 Status: `Complete`
 
 Evidence:
-- tokens/s reported throughout [results/benchmark_report.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/benchmark_report.md)
+- tokens/s reported throughout [results/benchmark_report.md](results/benchmark_report.md)
 
 ### Latency / TTFT if possible
 
@@ -118,7 +118,7 @@ Evidence:
 Status: `Partial`
 
 Evidence:
-- Engram table sizing is estimated in [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py)
+- Engram table sizing is estimated in [scripts/estimate_scale.py](scripts/estimate_scale.py)
 - report includes approximate Engram-table memory
 - not yet validated with a full live memory breakdown on cluster
 

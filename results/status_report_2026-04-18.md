@@ -22,8 +22,8 @@ The main remaining bottleneck is cross-device activation transfer in the current
 
 Implemented:
 
-- Separate naive baseline in [engrams_naive.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/engrams_naive.py).
-- Optimized Engram+mHC implementation in [engrams_kv_moe.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/engrams_kv_moe.py).
+- Separate naive baseline in [engrams_naive.py](engrams_naive.py).
+- Optimized Engram+mHC implementation in [engrams_kv_moe.py](engrams_kv_moe.py).
 - Dense FFN fallback and MoE path.
 - mHC-style residual wrapper with `hc_mult=4` support.
 - KV-cached optimized decoding.
@@ -54,13 +54,13 @@ conda run -n ai_infra_env_new pytest -q test_engrams.py
 
 Core scripts:
 
-- [scripts/benchmark_decode.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/benchmark_decode.py): single benchmark run.
-- [scripts/run_target_benchmark_matrix.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/run_target_benchmark_matrix.py): explicit device-group/decode-length matrix.
-- [scripts/sweep_cluster_placements.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/sweep_cluster_placements.py): automatic GPU availability probe and placement/decode sweep.
-- [scripts/run_cluster_placement_sweep.sh](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/run_cluster_placement_sweep.sh): one-command cluster wrapper for the placement sweep.
-- [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py): parameter, memory, and approximate cached decode FLOPs/token estimates.
-- [scripts/profile_decode_breakdown.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/profile_decode_breakdown.py): TTFT vs steady-state decode breakdown.
-- [scripts/profile_forward_components.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/profile_forward_components.py): component-level forward profiling.
+- [scripts/benchmark_decode.py](scripts/benchmark_decode.py): single benchmark run.
+- [scripts/run_target_benchmark_matrix.py](scripts/run_target_benchmark_matrix.py): explicit device-group/decode-length matrix.
+- [scripts/sweep_cluster_placements.py](scripts/sweep_cluster_placements.py): automatic GPU availability probe and placement/decode sweep.
+- [scripts/run_cluster_placement_sweep.sh](scripts/run_cluster_placement_sweep.sh): one-command cluster wrapper for the placement sweep.
+- [scripts/estimate_scale.py](scripts/estimate_scale.py): parameter, memory, and approximate cached decode FLOPs/token estimates.
+- [scripts/profile_decode_breakdown.py](scripts/profile_decode_breakdown.py): TTFT vs steady-state decode breakdown.
+- [scripts/profile_forward_components.py](scripts/profile_forward_components.py): component-level forward profiling.
 
 Cluster command to reproduce the next placement/decode sweep:
 

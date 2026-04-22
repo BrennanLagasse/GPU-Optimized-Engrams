@@ -492,9 +492,9 @@
 
 ## 2026-04-13 11:32 EDT
 - Added a proposal audit and paper-style metrics framing:
-  - [results/proposal_checklist.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/proposal_checklist.md)
-  - [results/paper_metrics_summary.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/paper_metrics_summary.md)
-- Extended [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py) with approximate cached-decode FLOPs/token estimates so target-scale benchmark numbers can be reported with a model-size/compute descriptor rather than tok/s alone.
+  - [results/proposal_checklist.md](results/proposal_checklist.md)
+  - [results/paper_metrics_summary.md](results/paper_metrics_summary.md)
+- Extended [scripts/estimate_scale.py](scripts/estimate_scale.py) with approximate cached-decode FLOPs/token estimates so target-scale benchmark numbers can be reported with a model-size/compute descriptor rather than tok/s alone.
 - Ran one more safe inference-only optimization round:
   - replaced `torch.no_grad()` with `torch.inference_mode()` across generation and profiling paths
   - touched optimized and naive generation plus decode/Engram profiling utilities
@@ -511,7 +511,7 @@
   - it reduces framework/autograd overhead, but it is not expected to solve the target-scale multi-GPU transfer bottleneck identified in earlier H200 profiling
 
 ## 2026-04-16 00:00 EDT
-- Added [scripts/sweep_cluster_placements.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/sweep_cluster_placements.py) for the next performance-focused loop.
+- Added [scripts/sweep_cluster_placements.py](scripts/sweep_cluster_placements.py) for the next performance-focused loop.
 - The sweep script:
   - probes `nvidia-smi` when available to find GPUs with enough free HBM
   - builds contiguous candidate GPU groups by default, avoiding an expensive all-combinations sweep unless `--allow-non-contiguous` is passed
@@ -550,8 +550,8 @@
   - `shortest_input_first`
   - `longest_output_first`
   - `longest_total_first`
-- Added [scripts/benchmark_serving.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/benchmark_serving.py), which can coordinate data-parallel serving replicas over GPU groups such as `0,1,2,3` and `4,5,6,7`.
-- Added [scripts/run_cluster_serving_scheduling.sh](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/run_cluster_serving_scheduling.sh) with default all-8-GPU usage via two 4-GPU model-parallel replicas.
+- Added [scripts/benchmark_serving.py](scripts/benchmark_serving.py), which can coordinate data-parallel serving replicas over GPU groups such as `0,1,2,3` and `4,5,6,7`.
+- Added [scripts/run_cluster_serving_scheduling.sh](scripts/run_cluster_serving_scheduling.sh) with default all-8-GPU usage via two 4-GPU model-parallel replicas.
 - Default scheduling benchmark choice:
   - `BATCH_SIZE=8`
   - `DEVICE_GROUPS="0,1,2,3 4,5,6,7"`
@@ -680,7 +680,7 @@
 ## 2026-04-21 17:58 EDT
 
 - Completed the target-scale serving ablation matrix on `gpu003` (`8 x NVIDIA H200`) for the 100-request `target_40b_approx` workload.
-- Added [results/serving_ablation_matrix_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_ablation_matrix_report_2026-04-21.md).
+- Added [results/serving_ablation_matrix_report_2026-04-21.md](results/serving_ablation_matrix_report_2026-04-21.md).
 - Key serving wall times excluding model load:
   - naive + random: `4882.758s`
   - naive + longest_input_first: `3629.573s`
@@ -721,7 +721,7 @@
 ## 2026-04-21 14:17 EDT
 
 - Completed the cached Engram serving ablation matrix on `gpu003` (`8 x NVIDIA H200`) for the `target_40b_approx` 100-request workload.
-- Added [results/cached_engram_ablation_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/cached_engram_ablation_report_2026-04-21.md).
+- Added [results/cached_engram_ablation_report_2026-04-21.md](results/cached_engram_ablation_report_2026-04-21.md).
 - Key serving wall times excluding model load:
   - naive + random: `4882.758s`
   - cached_full_engram + random: `191.678s`
@@ -746,7 +746,7 @@
 
 ## 2026-04-21 14:40 EDT
 
-- Added [results/current_findings_2026-04-21_1440.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/current_findings_2026-04-21_1440.md).
+- Added [results/current_findings_2026-04-21_1440.md](results/current_findings_2026-04-21_1440.md).
 - The report consolidates:
   - scheduler ablation results
   - cached-full Engram ablation results
@@ -788,7 +788,7 @@
   - `input_bucketed_random` scheduling policy, which uses known input-length buckets and randomizes within each bucket
   - `scripts/run_cluster_serving_optimization_sweep.sh`
   - `scripts/report_serving_optimization_sweep.py`
-  - [results/serving_optimization_sweep_report_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_optimization_sweep_report_2026-04-21.md)
+  - [results/serving_optimization_sweep_report_2026-04-21.md](results/serving_optimization_sweep_report_2026-04-21.md)
 - Measured variants:
   - batch-size sweep for `optimized_cached + longest_input_first + static`: B1, B2, B4, B16
   - compact decode for B4 and B16
@@ -820,7 +820,7 @@
   - tensor parallelism
   - external serving baselines such as vLLM/SGLang
   - cost-model-driven scheduler search
-- Added [results/serving_architecture_probe_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_architecture_probe_2026-04-21.md).
+- Added [results/serving_architecture_probe_2026-04-21.md](results/serving_architecture_probe_2026-04-21.md).
 - Main feasibility result:
   - the current optimized attention cache uses one shared scalar `ptr_current_pos` per batch
   - true continuous batching, decode microbatching, and prefill/decode disaggregation all require request-level cache positions or paged/cache-block metadata
@@ -829,11 +829,11 @@
   - The script uses measured 40B serving points as calibration.
   - It estimates static, compact, idealized continuous-refill, decode-microbatch, and prefill/decode-disaggregated strategies.
   - These estimates are planning signals only, not measured GPU benchmark claims.
-- Generated [results/serving_strategy_cost_model_2026-04-21.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/serving_strategy_cost_model_2026-04-21.md).
+- Generated [results/serving_strategy_cost_model_2026-04-21.md](results/serving_strategy_cost_model_2026-04-21.md).
   - top estimated family: idealized continuous refill with per-row/paged KV cache
   - estimated best: about `156.995s`, compared with current measured best `163.306s`
   - interpretation: likely modest additional gain unless a more realistic arrival-process workload exposes larger continuous-batching benefits
-- Added [results/future_serving_optimization_report_2026-04-21_1710.md](/Users/vincentli/Desktop/GPU-Optimized-Engrams/results/future_serving_optimization_report_2026-04-21_1710.md).
+- Added [results/future_serving_optimization_report_2026-04-21_1710.md](results/future_serving_optimization_report_2026-04-21_1710.md).
 - External baseline check:
   - `vllm` was not importable locally
   - `sglang` was not importable locally
@@ -922,3 +922,51 @@
   - exact per-request prefill and slot-indexed cache overhead offset the saved decode padding
   - oracle continuous is worse here because sorting by output length degrades the input-length/prefill locality that dominates this workload
 - Fixed `scripts/report_serving_optimization_sweep.py` to skip non-dict helper JSON files such as `.replica*.batches.json`.
+
+## 2026-04-22 16:45 EDT
+
+- Ran B32/B64 large-batch serving sweeps on the H200 cluster and found a new best measured realistic configuration.
+- Hardware/model/workload:
+  - `gpu003`
+  - `8 x NVIDIA H200`, two model-parallel replicas over devices `0,1,2,3` and `4,5,6,7`
+  - preset `target_40b_approx`, about `39.98B` params, dtype `bfloat16`
+  - `100` deterministic long-tailed requests, mean input/output `128`, max input/output `1024`, total requested output `12,800`
+- New best:
+  - `MODEL_IMPL=optimized_cached`
+  - `POLICY=longest_input_first`
+  - `REPLICA_ASSIGNMENT=greedy_prefill`
+  - `DECODE_MODE=compact`
+  - `BATCH_SIZE=32`
+  - serving time excluding model load: `131.728s`
+  - requested output throughput: `97.170 tok/s`
+  - speedup vs naive random static B8 (`4882.758s`): `37.07x`
+  - time reduction vs naive random static B8: `97.30%`
+  - improvement vs prior B16 compact best (`163.306s`): `19.34%`
+- Large-batch comparison:
+  - B32 compact greedy-prefill: `131.728s`, best measured
+  - B64 compact greedy-prefill: `132.517s`, `0.60%` slower than B32 compact greedy-prefill
+  - B64 compact round-robin: `132.731s`, `0.76%` slower than B32 compact greedy-prefill
+  - B32 compact round-robin: `177.720s`, `34.91%` slower than B32 compact greedy-prefill
+  - B32 static round-robin: `359.340s`, `172.80%` slower than B32 compact greedy-prefill
+  - B32 static greedy-prefill: `243.960s`, `85.20%` slower than B32 compact greedy-prefill
+  - B64 static greedy-prefill: `446.126s`, `238.67%` slower than B32 compact greedy-prefill
+  - B32 continuous round-robin: `186.199s`, `41.35%` slower than B32 compact greedy-prefill
+  - B64 continuous round-robin: `156.372s`, `18.70%` slower than B32 compact greedy-prefill
+- Interpretation:
+  - B32 compact with greedy-prefill is the approximate measured optimum for this fixed 100-request workload.
+  - B64 compact is slightly slower, so increasing batch size past B32 decreases serving speed.
+  - B128 was not run because B64 already decreased and `BATCH_SIZE=128` would collapse this 100-request workload into one effective batch, leaving one replica idle.
+  - Greedy-prefill becomes important at B32 because fewer, larger batches make round-robin assignment much more sensitive to one bad batch.
+- Added measured prefill/decode stage-cost instrumentation:
+  - `scripts/benchmark_serving.py` now emits `prefill_seconds` and `decode_seconds` for optimized static/compact batches.
+  - `scripts/report_prefill_decode_stage_costs.py` estimates a staged prefill/decode pipeline from measured batch timings.
+- Prefill/decode stage-cost experiment on the new B32 compact greedy-prefill result:
+  - measured serving baseline: `131.728s`
+  - sum of measured prefill stages: `9.574s`
+  - sum of measured decode stages: `220.153s`
+  - estimated staged prefill/decode pipeline: `227.832s`
+  - estimated staged pipeline speedup: `0.58x`, i.e. `72.96%` slower
+  - conclusion: prefill/decode disaggregation is not a current measured win for this closed-batch workload because the best configuration is decode-dominated and the stage split gives up two-replica data parallelism.
+- Documentation:
+  - added `results/large_batch_sweep_report_2026-04-22.md`
+  - updated `results/best_serving_results_report_2026-04-22.md`

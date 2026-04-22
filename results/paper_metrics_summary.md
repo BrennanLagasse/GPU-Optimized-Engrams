@@ -11,7 +11,7 @@ This file reframes the current benchmark state in the style most useful for the 
 
 ## Representative Target-Scale Configs
 
-Derived from [scripts/estimate_scale.py](/Users/vincentli/Desktop/GPU-Optimized-Engrams/scripts/estimate_scale.py).
+Derived from [scripts/estimate_scale.py](scripts/estimate_scale.py).
 
 | Preset | Params | Backbone | bf16 param GiB/rank at TP=8 | KV cache GiB | Activation GiB | Cached decode FLOPs/token at ctx=64 |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
