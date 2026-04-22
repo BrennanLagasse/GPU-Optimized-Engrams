@@ -32,6 +32,8 @@ The strongest result is not from one optimization alone. The dominant gain comes
 
 This project evaluates GPU-oriented inference and serving optimizations for an Engram/mHC-style transformer implementation. The current benchmark is not a production online serving benchmark with arrivals over time. It is a closed 100-request batch designed to stress heterogeneous request scheduling while keeping the benchmark reproducible.
 
+The project scope is purely inference speed. The goal is not to improve model quality, task accuracy, or downstream performance. For this reason, random weights are sufficient for the speed experiments as long as the naive and optimized implementations have matching behavior under the same weights and inputs.
+
 The goal of this phase was to answer:
 
 - Can the optimized implementation match the naive implementation's outputs?
@@ -64,7 +66,7 @@ Model:
 - preset: `target_40b_approx`
 - approximate parameter count: `39,978,323,440`, about `39.98B`
 - dtype: `bfloat16`
-- Engram layer placement: two Engram layers, matching the intended two-layer Engram setup
+- Engram layer placement: `[1, 15]`, meaning the second and sixteenth transformer layers under 0-indexed layer numbering
 - rough compute framing: a dense transformer forward pass is commonly approximated as about `2 x parameter_count` multiply-add FLOPs per generated token, so this model is roughly `80 GFLOP/token` before attention/KV-cache and Engram-specific overheads. This is a sizing heuristic, not a profiler-derived FLOP count.
 
 ## Workload Methodology
@@ -84,6 +86,8 @@ Output lengths:
 - mean `128` tokens
 - max `1024` tokens
 - at least one request reaches the max length
+
+Input and output lengths were generated from separate deterministic long-tailed draws, so they are independent except for one deliberate stress-test constraint: request `0` is forced to have both the maximum input length and the maximum output length. This guarantees that the workload contains at least one worst-case request with `1024` input tokens and `1024` output tokens.
 
 Total requested output tokens:
 
@@ -122,7 +126,7 @@ Secondary metrics:
 - decode padding overhead
 - total wall seconds including worker startup, when available
 
-The headline `29.90x` is computed from serving time:
+The headline `29.90x` is computed from serving time. The numerator is the naive baseline serving time: `naive + random + static + BATCH_SIZE=8`, measured at `4882.758s`. The denominator is the best realistic optimized serving time: `optimized_cached + longest_input_first + compact + BATCH_SIZE=16`, measured at `163.306s`.
 
 ```text
 4882.758s / 163.306s = 29.90x
@@ -343,6 +347,7 @@ Assumptions:
 - Input length is known before scheduling.
 - Output length is unknown before generation and should not be used for deployable scheduling.
 - The workload is closed: all 100 requests are available at the start.
+- Input and output lengths are independently generated except for the single forced max-input/max-output stress request.
 - The synthetic long-tailed distribution is a proxy for heterogeneous serving traffic.
 - Serving time excluding model load is the correct primary metric for comparing serving loop performance.
 
@@ -351,6 +356,7 @@ Limitations:
 - The workload does not model real arrival times, queueing delay, or time-to-first-token.
 - Output lengths are deterministic targets, not produced by semantic EOS behavior.
 - The benchmark measures throughput/makespan, not quality.
+- Random model weights are acceptable for this benchmark because the project is evaluating inference speed and implementation equivalence, not model accuracy.
 - The implementation is research code, not a production serving stack.
 - Tensor parallelism, paged KV, and production continuous batching are not fully explored.
 - Some apparent small differences near 1% should be interpreted cautiously because cluster scheduling and GPU runtime noise can matter at that scale.
@@ -364,6 +370,7 @@ Strong claim:
 More precise claim:
 
 - The best measured realistic configuration is `optimized_cached + longest_input_first + compact + BATCH_SIZE=16`, with `163.306s` serving time and `78.381 requested output tok/s`.
+- The benchmark uses random weights because the result is an inference-speed comparison, not a quality or accuracy claim.
 
 Attribution claim:
 
