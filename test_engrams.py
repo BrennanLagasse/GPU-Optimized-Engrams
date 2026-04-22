@@ -314,6 +314,57 @@ def test_model_per_row_cache_positions_allow_slot_refill_no_engrams():
     assert torch.allclose(out3[1, 0], refill_full[0, 1], atol=1e-5)
 
 
+def test_model_cache_row_indices_allow_noncontiguous_slots_no_engrams():
+    torch.manual_seed(0)
+    config = DEFAULT_CONFIG.copy()
+    config.update({
+        "vocab_size": 64,
+        "context_length": 16,
+        "emb_dim": 32,
+        "hidden_dim": 64,
+        "n_heads": 4,
+        "n_layers": 2,
+        "drop_rate": 0.0,
+        "layer_ids": [],
+        "hc_mult": 1,
+    })
+    model = EngramsModel(config)
+    model.eval()
+
+    first = torch.randint(0, config["vocab_size"], (1, 3), dtype=torch.long)
+    second = torch.randint(0, config["vocab_size"], (1, 3), dtype=torch.long)
+
+    with torch.inference_mode():
+        first_full = model(first, use_cache=False, position_offset=0)
+        second_full = model(second, use_cache=False, position_offset=0)
+
+        model.reset_cache()
+        out_first_prefill = model(
+            first[:, :2],
+            use_cache=True,
+            cache_positions=torch.tensor([0]),
+            cache_row_indices=torch.tensor([2]),
+        )
+        out_second_prefill = model(
+            second[:, :2],
+            use_cache=True,
+            cache_positions=torch.tensor([0]),
+            cache_row_indices=torch.tensor([0]),
+        )
+        step = torch.cat([first[:, 2:3], second[:, 2:3]], dim=0)
+        out_step = model(
+            step,
+            use_cache=True,
+            cache_positions=torch.tensor([2, 2]),
+            cache_row_indices=torch.tensor([2, 0]),
+        )
+
+    assert torch.allclose(out_first_prefill[0, -1], first_full[0, 1], atol=1e-5)
+    assert torch.allclose(out_second_prefill[0, -1], second_full[0, 1], atol=1e-5)
+    assert torch.allclose(out_step[0, 0], first_full[0, 2], atol=1e-5)
+    assert torch.allclose(out_step[1, 0], second_full[0, 2], atol=1e-5)
+
+
 def test_weighted_device_map_is_contiguous_and_biases_engram_heavy_front_block():
     mapped = normalize_device_map(
         ["cpu:0", "cpu:1"],

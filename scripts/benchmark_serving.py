@@ -16,7 +16,13 @@ from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg
 from engrams_naive import NaiveEngramsModel
 from scripts.estimate_scale import PRESETS, estimate_model_params
 from scripts.run_target_benchmark_matrix import parse_device_group
-from scripts.serving_scheduler import ORACLE_POLICIES, ScheduledBatch, make_static_batches, summarize_schedule
+from scripts.serving_scheduler import (
+    ORACLE_POLICIES,
+    ScheduledBatch,
+    make_static_batches,
+    order_requests,
+    summarize_schedule,
+)
 from scripts.serving_workload import (
     ServingRequest,
     build_serving_requests,
@@ -92,6 +98,42 @@ def random_padded_batch(
         )
         input_ids[row, max_len - request.input_length :] = values
     return input_ids
+
+
+def random_request_input(
+    request: ServingRequest,
+    *,
+    vocab_size: int,
+    device: torch.device,
+    seed: int,
+) -> torch.Tensor:
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed + request.request_id)
+    return torch.randint(
+        3,
+        vocab_size,
+        (1, request.input_length),
+        device=device,
+        dtype=torch.long,
+        generator=generator,
+    )
+
+
+def pad_engram_windows(windows: list[torch.Tensor], *, pad_id: int = 0) -> torch.Tensor:
+    max_len = max(window.shape[1] for window in windows)
+    padded = []
+    for window in windows:
+        if window.shape[1] == max_len:
+            padded.append(window)
+            continue
+        pad = torch.full(
+            (window.shape[0], max_len - window.shape[1]),
+            pad_id,
+            device=window.device,
+            dtype=window.dtype,
+        )
+        padded.append(torch.cat([pad, window], dim=1))
+    return torch.cat(padded, dim=0)
 
 
 def serve_static_batch_optimized(
@@ -180,6 +222,141 @@ def serve_static_batch_optimized(
         "padded_decode_tokens": batch.padded_decode_tokens,
         "executed_decode_tokens": executed_decode_tokens,
         "seconds": seconds,
+    }
+
+
+def serve_continuous_optimized(
+    model: EngramsModel,
+    requests: list[ServingRequest],
+    *,
+    config: dict,
+    device: torch.device,
+    seed: int,
+    capacity: int,
+    policy: str,
+    replica_id: int,
+) -> dict[str, float | int | str]:
+    if capacity <= 0:
+        raise ValueError("capacity must be positive")
+
+    ordered = order_requests(requests, policy, seed=seed)
+    queue_idx = 0
+    slots: list[dict | None] = [None for _ in range(capacity)]
+    max_ngram = config["engrams_cfg"].max_ngram_size
+    pad_id = config["engrams_cfg"].pad_id
+    requested_input = sum(request.input_length for request in ordered)
+    requested_output = sum(request.output_length for request in ordered)
+    executed_decode_tokens = 0
+    prefill_tokens = 0
+    completed = 0
+
+    def admit_request(slot: int, request: ServingRequest) -> None:
+        nonlocal executed_decode_tokens, prefill_tokens, completed
+        model.reset_cache_rows(torch.tensor([slot], device=device, dtype=torch.long))
+        input_ids = random_request_input(
+            request,
+            vocab_size=config["vocab_size"],
+            device=device,
+            seed=seed,
+        )
+        logits = model(
+            input_ids,
+            use_cache=True,
+            cache_positions=torch.tensor([0], device=device, dtype=torch.long),
+            cache_row_indices=torch.tensor([slot], device=device, dtype=torch.long),
+            engram_input_ids=input_ids,
+        )
+        next_idx = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=input_ids.device)
+        executed_decode_tokens += 1
+        prefill_tokens += request.input_length
+        if request.output_length <= 1:
+            completed += 1
+            model.reset_cache_rows(torch.tensor([slot], device=device, dtype=torch.long))
+            slots[slot] = None
+            return
+        engram_window = torch.cat(
+            [input_ids[:, -max(max_ngram - 1, 1) :], next_idx],
+            dim=1,
+        )[:, -max_ngram:]
+        slots[slot] = {
+            "request": request,
+            "next_idx": next_idx,
+            "engram_window": engram_window,
+            "generated": 1,
+        }
+
+    def refill_free_slots() -> None:
+        nonlocal queue_idx
+        for slot in range(capacity):
+            while slots[slot] is None and queue_idx < len(ordered):
+                request = ordered[queue_idx]
+                queue_idx += 1
+                admit_request(slot, request)
+
+    model.reset_cache()
+    sync_device(device)
+    start = time.perf_counter()
+    with torch.inference_mode():
+        refill_free_slots()
+        while completed < len(ordered):
+            active_slots = [slot for slot, state in enumerate(slots) if state is not None]
+            if not active_slots:
+                refill_free_slots()
+                continue
+            next_batch = torch.cat([slots[slot]["next_idx"] for slot in active_slots], dim=0)
+            cache_positions = torch.tensor(
+                [
+                    slots[slot]["request"].input_length + slots[slot]["generated"] - 1
+                    for slot in active_slots
+                ],
+                device=device,
+                dtype=torch.long,
+            )
+            cache_row_indices = torch.tensor(active_slots, device=device, dtype=torch.long)
+            engram_input_ids = pad_engram_windows(
+                [slots[slot]["engram_window"] for slot in active_slots],
+                pad_id=pad_id,
+            )
+            logits = model(
+                next_batch,
+                use_cache=True,
+                cache_positions=cache_positions,
+                cache_row_indices=cache_row_indices,
+                engram_input_ids=engram_input_ids,
+            )
+            new_next = logits[:, -1].argmax(dim=-1, keepdim=True).to(device=next_batch.device)
+            executed_decode_tokens += len(active_slots)
+
+            for row, slot in enumerate(active_slots):
+                state = slots[slot]
+                state["generated"] += 1
+                request = state["request"]
+                if state["generated"] >= request.output_length:
+                    completed += 1
+                    model.reset_cache_rows(torch.tensor([slot], device=device, dtype=torch.long))
+                    slots[slot] = None
+                    continue
+                state["next_idx"] = new_next[row : row + 1]
+                state["engram_window"] = torch.cat(
+                    [state["engram_window"], state["next_idx"]],
+                    dim=1,
+                )[:, -max_ngram:]
+            refill_free_slots()
+    sync_device(device)
+    seconds = time.perf_counter() - start
+    return {
+        "batch_id": -1,
+        "replica_id": replica_id,
+        "batch_size": min(capacity, len(ordered)),
+        "max_input_length": max((request.input_length for request in ordered), default=0),
+        "max_output_length": max((request.output_length for request in ordered), default=0),
+        "requested_input_tokens": requested_input,
+        "requested_output_tokens": requested_output,
+        "padded_prefill_tokens": prefill_tokens,
+        "padded_decode_tokens": requested_output,
+        "executed_decode_tokens": executed_decode_tokens,
+        "seconds": seconds,
+        "scheduler_runtime": "continuous_refill",
     }
 
 
@@ -299,12 +476,27 @@ def run_worker(args: argparse.Namespace) -> dict:
     config = config_from_preset(preset, device_map, cached_short_conv_mode=cached_short_conv_mode)
     torch.manual_seed(args.seed)
     model = build_model(args, config=config, device=device, dtype=dtype)
-    serve_batch = serve_static_batch_naive if args.model_impl == "naive" else serve_static_batch_optimized
-
-    batch_results = [
-        serve_batch(model, batch, config=config, device=device, seed=args.seed, decode_mode=args.decode_mode)
-        for batch in batches
-    ]
+    if args.decode_mode == "continuous":
+        if args.model_impl == "naive":
+            raise SystemExit("continuous decode requires the optimized cached model")
+        batch_results = [
+            serve_continuous_optimized(
+                model,
+                selected,
+                config=config,
+                device=device,
+                seed=args.seed,
+                capacity=args.batch_size,
+                policy=args.policy,
+                replica_id=args.replica_id,
+            )
+        ]
+    else:
+        serve_batch = serve_static_batch_naive if args.model_impl == "naive" else serve_static_batch_optimized
+        batch_results = [
+            serve_batch(model, batch, config=config, device=device, seed=args.seed, decode_mode=args.decode_mode)
+            for batch in batches
+        ]
     total_seconds = sum(item["seconds"] for item in batch_results)
     requested_output = sum(item["requested_output_tokens"] for item in batch_results)
     executed_decode = sum(item["executed_decode_tokens"] for item in batch_results)
@@ -539,7 +731,7 @@ def main() -> None:
         choices=["round_robin", "greedy_prefill", "greedy_oracle"],
         default="round_robin",
     )
-    parser.add_argument("--decode-mode", choices=["static", "compact"], default="static")
+    parser.add_argument("--decode-mode", choices=["static", "compact", "continuous"], default="static")
     parser.add_argument("--num-requests", type=int, default=100)
     parser.add_argument("--mean-input-tokens", type=int, default=128)
     parser.add_argument("--mean-output-tokens", type=int, default=128)

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run deployable serving/scheduling variants on the H200 cluster. This sweep is
-# intentionally focused on changes that are compatible with the current shared
-# batch-position KV cache.
+# Run deployable serving/scheduling variants on the H200 cluster. This sweep
+# includes static/compact batching plus the continuous refill path that uses
+# request-level cache slot metadata.
 
 BRANCH="${BRANCH:-engrams-baseline-benchmarking}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -62,6 +62,16 @@ run_case serving_opt_sweep_optimized_bucketed_static_b16 MODEL_IMPL=optimized_ca
 # slower than static, so this checks whether the tradeoff changes with batch.
 run_case serving_opt_sweep_optimized_input_compact_b4 MODEL_IMPL=optimized_cached POLICY=longest_input_first DECODE_MODE=compact BATCH_SIZE=4 REPLICA_ASSIGNMENT=round_robin
 run_case serving_opt_sweep_optimized_input_compact_b16 MODEL_IMPL=optimized_cached POLICY=longest_input_first DECODE_MODE=compact BATCH_SIZE=16 REPLICA_ASSIGNMENT=round_robin
+
+# Continuous refill admits a new request into a completed slot without flushing
+# the rest of the batch. This is realistic because it uses only known input
+# lengths for ordering and observes completion online.
+run_case serving_opt_sweep_optimized_input_continuous_b8 MODEL_IMPL=optimized_cached POLICY=longest_input_first DECODE_MODE=continuous BATCH_SIZE=8 REPLICA_ASSIGNMENT=round_robin
+run_case serving_opt_sweep_optimized_input_continuous_b16 MODEL_IMPL=optimized_cached POLICY=longest_input_first DECODE_MODE=continuous BATCH_SIZE=16 REPLICA_ASSIGNMENT=round_robin
+
+# Oracle continuous remains diagnostic only; it sorts by output length, which a
+# real serving system does not know before generation completes.
+run_case serving_opt_sweep_optimized_oracle_continuous_b16 MODEL_IMPL=optimized_cached POLICY=longest_output_first DECODE_MODE=continuous BATCH_SIZE=16 REPLICA_ASSIGNMENT=round_robin
 
 "${PYTHON_BIN}" scripts/report_serving_optimization_sweep.py \
   --output results/serving_optimization_sweep_report_2026-04-21.md

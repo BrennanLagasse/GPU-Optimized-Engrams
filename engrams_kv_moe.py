@@ -248,6 +248,75 @@ class ShortConv(nn.Module):
 
         self.register_buffer("cache_x_norm", None, persistent=False)
 
+    def _ensure_history_capacity(
+        self,
+        batch_size: int,
+        groups: int,
+        channels: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        cache_row_indices: torch.Tensor | None = None,
+    ) -> None:
+        if self.history_len <= 0:
+            return
+        required_rows = batch_size
+        if cache_row_indices is not None and cache_row_indices.numel() > 0:
+            required_rows = max(required_rows, int(cache_row_indices.max().item()) + 1)
+        needs_realloc = (
+            self.cache_x_norm is None
+            or self.cache_x_norm.shape[0] < required_rows
+            or self.cache_x_norm.shape[1] != self.history_len
+            or self.cache_x_norm.shape[2] != groups
+            or self.cache_x_norm.shape[3] != channels
+            or self.cache_x_norm.device != device
+            or self.cache_x_norm.dtype != dtype
+        )
+        if not needs_realloc:
+            return
+        new_cache = torch.zeros(
+            required_rows,
+            self.history_len,
+            groups,
+            channels,
+            device=device,
+            dtype=dtype,
+        )
+        if self.cache_x_norm is not None:
+            rows = min(self.cache_x_norm.shape[0], new_cache.shape[0])
+            hist = min(self.cache_x_norm.shape[1], new_cache.shape[1])
+            new_cache[:rows, -hist:] = self.cache_x_norm[:rows, -hist:].to(device=device, dtype=dtype)
+        self.cache_x_norm = new_cache
+
+    def _update_history(self, x_norm: torch.Tensor, cache_row_indices: torch.Tensor | None = None) -> None:
+        if self.history_len <= 0:
+            return
+        B, _, G, C = x_norm.shape
+        history = x_norm[:, -self.history_len :, :, :].detach().clone()
+        if history.shape[1] < self.history_len:
+            pad = torch.zeros(
+                B,
+                self.history_len - history.shape[1],
+                G,
+                C,
+                device=x_norm.device,
+                dtype=x_norm.dtype,
+            )
+            history = torch.cat([pad, history], dim=1)
+        if cache_row_indices is None:
+            self.cache_x_norm = history
+            return
+        cache_row_indices = cache_row_indices.to(device=x_norm.device, dtype=torch.long)
+        self._ensure_history_capacity(
+            B,
+            G,
+            C,
+            device=x_norm.device,
+            dtype=x_norm.dtype,
+            cache_row_indices=cache_row_indices,
+        )
+        self.cache_x_norm[cache_row_indices] = history
+
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         B, T, G, C = x.shape
         if G == 1:
@@ -258,7 +327,7 @@ class ShortConv(nn.Module):
             normed_chunks.append(self.norms[i](x[:, :, i, :]))
         return torch.stack(normed_chunks, dim=2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_row_indices: torch.Tensor | None = None) -> torch.Tensor:
         """
         Input:  (B,L,HC_MULT,D)
         Output: (B,L,HC_MULT,D)
@@ -274,12 +343,10 @@ class ShortConv(nn.Module):
             y_bct = self.conv(chunk.transpose(1, 2))[..., :T]
             if self.activation:
                 y_bct = self.act_fn(y_bct)
-            if self.history_len > 0:
-                self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
+            self._update_history(x_norm, cache_row_indices=cache_row_indices)
             return y_bct.transpose(1, 2).unsqueeze(2).contiguous()
 
-        if self.history_len > 0:
-            self.cache_x_norm = x_norm[:, -self.history_len :, :, :].detach().clone()
+        self._update_history(x_norm, cache_row_indices=cache_row_indices)
 
         x_norm = x_norm.reshape(B, T, G * C)
         x_bct = x_norm.transpose(1, 2)
@@ -292,7 +359,7 @@ class ShortConv(nn.Module):
         
         return y
 
-    def forward_step(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_step(self, x: torch.Tensor, cache_row_indices: torch.Tensor | None = None) -> torch.Tensor:
         """
         Exact cached-decode path for a single token using buffered normalized
         history instead of re-running the convolution over the full sequence.
@@ -305,17 +372,20 @@ class ShortConv(nn.Module):
 
         x_norm = self._normalize(x)
         if self.history_len > 0:
-            if (
-                self.cache_x_norm is None
-                or self.cache_x_norm.shape[0] != B
-                or self.cache_x_norm.shape[2] != G
-                or self.cache_x_norm.shape[3] != C
-                or self.cache_x_norm.device != x.device
-                or self.cache_x_norm.dtype != x.dtype
-            ):
-                history = torch.zeros(B, self.history_len, G, C, device=x.device, dtype=x.dtype)
+            if cache_row_indices is None:
+                self._ensure_history_capacity(B, G, C, device=x.device, dtype=x.dtype)
+                history = self.cache_x_norm[:B]
             else:
-                history = self.cache_x_norm
+                cache_row_indices = cache_row_indices.to(device=x.device, dtype=torch.long)
+                self._ensure_history_capacity(
+                    B,
+                    G,
+                    C,
+                    device=x.device,
+                    dtype=x.dtype,
+                    cache_row_indices=cache_row_indices,
+                )
+                history = self.cache_x_norm.index_select(0, cache_row_indices)
             seq = torch.cat([history, x_norm], dim=1)
         else:
             seq = x_norm
@@ -328,7 +398,11 @@ class ShortConv(nn.Module):
             y = self.act_fn(y)
 
         if self.history_len > 0:
-            self.cache_x_norm = seq[:, -self.history_len :, :, :].detach().clone()
+            history = seq[:, -self.history_len :, :, :].detach().clone()
+            if cache_row_indices is None:
+                self.cache_x_norm[:B] = history
+            else:
+                self.cache_x_norm[cache_row_indices] = history
 
         return y.view(B, T, G, C).contiguous()
 
@@ -338,7 +412,9 @@ class ShortConv(nn.Module):
     def reset_cache_rows(self, row_indices: torch.Tensor):
         if self.cache_x_norm is not None:
             indices = row_indices.to(device=self.cache_x_norm.device, dtype=torch.long)
-            self.cache_x_norm[indices] = 0
+            indices = indices[indices < self.cache_x_norm.shape[0]]
+            if indices.numel() > 0:
+                self.cache_x_norm[indices] = 0
 
     def compact_cache(self, active_indices: torch.Tensor):
         if self.cache_x_norm is not None:
@@ -785,7 +861,14 @@ class Engram(nn.Module):
         self.key_norm = nn.RMSNorm(self.model_dim)
         self.query_norm = nn.RMSNorm(self.model_dim)
     
-    def forward(self, hidden_states, input_ids, precomputed_hashes=None, use_cache=False):
+    def forward(
+        self,
+        hidden_states,
+        input_ids,
+        precomputed_hashes=None,
+        use_cache=False,
+        cache_row_indices=None,
+    ):
         """
         hidden_states: [B, L, D]
         input_ids: [B, L]
@@ -833,7 +916,10 @@ class Engram(nn.Module):
 
         if use_cache and hidden_states.shape[1] == 1 and short_conv_mode != "full":
             if short_conv_mode == "step_kernel":
-                short_conv_out = self.short_conv.forward_step(short_conv_input)
+                short_conv_out = self.short_conv.forward_step(
+                    short_conv_input,
+                    cache_row_indices=cache_row_indices,
+                )
             elif short_conv_mode == "gated_value_only":
                 short_conv_out = torch.zeros_like(short_conv_input)
             else:
@@ -842,7 +928,7 @@ class Engram(nn.Module):
                     "{'full', 'step_kernel', 'gated_value_only'}"
                 )
         else:
-            short_conv_out = self.short_conv(short_conv_input)
+            short_conv_out = self.short_conv(short_conv_input, cache_row_indices=cache_row_indices)
 
         output = short_conv_input + short_conv_out
         return output.squeeze(2)
@@ -883,16 +969,18 @@ class MultiHeadAttention(nn.Module):
         self.ptr_current_pos = 0
         self.cache_capacity = config["context_length"]
 
-    def _ensure_cache_capacity(self, keys_new, values_new, required=None):
+    def _ensure_cache_capacity(self, keys_new, values_new, required=None, required_rows=None):
         batch_size, num_tokens, _, _ = keys_new.shape
         if required is None:
             required = self.ptr_current_pos + num_tokens
+        if required_rows is None:
+            required_rows = batch_size
         capacity = max(self.cache_capacity, required)
 
         needs_realloc = (
             self.cache_k is None
             or self.cache_v is None
-            or self.cache_k.shape[0] != batch_size
+            or self.cache_k.shape[0] < required_rows
             or self.cache_k.shape[1] < required
             or self.cache_k.dtype != keys_new.dtype
             or self.cache_k.device != keys_new.device
@@ -901,7 +989,7 @@ class MultiHeadAttention(nn.Module):
             return
 
         new_k = torch.empty(
-            batch_size,
+            required_rows,
             capacity,
             self.num_heads,
             self.head_dim,
@@ -919,12 +1007,16 @@ class MultiHeadAttention(nn.Module):
         self.cache_k = new_k
         self.cache_v = new_v
 
-        if self.cache_lengths is None or self.cache_lengths.shape[0] != batch_size:
-            self.cache_lengths = torch.zeros(batch_size, device=keys_new.device, dtype=torch.long)
+        if self.cache_lengths is None or self.cache_lengths.shape[0] < required_rows:
+            new_lengths = torch.zeros(required_rows, device=keys_new.device, dtype=torch.long)
+            if self.cache_lengths is not None:
+                rows = min(self.cache_lengths.shape[0], new_lengths.shape[0])
+                new_lengths[:rows] = self.cache_lengths[:rows].to(device=keys_new.device)
+            self.cache_lengths = new_lengths
         else:
             self.cache_lengths = self.cache_lengths.to(device=keys_new.device)
 
-    def _forward_per_row_cache(self, keys_new, values_new, queries, cache_positions):
+    def _forward_per_row_cache(self, keys_new, values_new, queries, cache_positions, cache_row_indices=None):
         b, num_tokens, _, _ = keys_new.shape
         if cache_positions.shape != (b,):
             raise ValueError(f"cache_positions must have shape ({b},), got {tuple(cache_positions.shape)}")
@@ -932,20 +1024,32 @@ class MultiHeadAttention(nn.Module):
             raise ValueError("cache_positions must be non-negative")
 
         cache_positions = cache_positions.to(device=keys_new.device, dtype=torch.long)
+        if cache_row_indices is None:
+            cache_row_indices = torch.arange(b, device=keys_new.device, dtype=torch.long)
+        else:
+            cache_row_indices = cache_row_indices.to(device=keys_new.device, dtype=torch.long)
+        if cache_row_indices.shape != (b,):
+            raise ValueError(f"cache_row_indices must have shape ({b},), got {tuple(cache_row_indices.shape)}")
+        if (cache_row_indices < 0).any():
+            raise ValueError("cache_row_indices must be non-negative")
+
         row_ends = cache_positions + num_tokens
         required = int(row_ends.max().item()) if row_ends.numel() else num_tokens
-        self._ensure_cache_capacity(keys_new, values_new, required=required)
+        required_rows = int(cache_row_indices.max().item()) + 1 if cache_row_indices.numel() else b
+        self._ensure_cache_capacity(keys_new, values_new, required=required, required_rows=required_rows)
 
         for row in range(b):
             start = int(cache_positions[row].item())
             end = start + num_tokens
-            self.cache_k[row, start:end] = keys_new[row]
-            self.cache_v[row, start:end] = values_new[row]
-            self.cache_lengths[row] = max(int(self.cache_lengths[row].item()), end)
+            cache_row = int(cache_row_indices[row].item())
+            self.cache_k[cache_row, start:end] = keys_new[row]
+            self.cache_v[cache_row, start:end] = values_new[row]
+            self.cache_lengths[cache_row] = max(int(self.cache_lengths[cache_row].item()), end)
 
-        max_end = int(self.cache_lengths.max().item()) if self.cache_lengths.numel() else required
-        keys = self.cache_k[:, :max_end].transpose(1, 2)
-        values = self.cache_v[:, :max_end].transpose(1, 2)
+        selected_lengths = self.cache_lengths.index_select(0, cache_row_indices)
+        max_end = int(selected_lengths.max().item()) if selected_lengths.numel() else required
+        keys = self.cache_k.index_select(0, cache_row_indices)[:, :max_end].transpose(1, 2)
+        values = self.cache_v.index_select(0, cache_row_indices)[:, :max_end].transpose(1, 2)
         queries = queries.transpose(1, 2)
 
         attn_scores = queries @ keys.transpose(2, 3)
@@ -953,7 +1057,7 @@ class MultiHeadAttention(nn.Module):
         q_offsets = torch.arange(num_tokens, device=queries.device, dtype=torch.long)
         q_positions = cache_positions.unsqueeze(1) + q_offsets.unsqueeze(0)
         k_positions = torch.arange(max_end, device=queries.device, dtype=torch.long)
-        row_lengths = self.cache_lengths.to(device=queries.device).unsqueeze(1)
+        row_lengths = selected_lengths.to(device=queries.device).unsqueeze(1)
         mask_bool = (k_positions.view(1, 1, max_end) > q_positions.unsqueeze(-1)) | (
             k_positions.view(1, 1, max_end) >= row_lengths.unsqueeze(-1)
         )
@@ -966,7 +1070,7 @@ class MultiHeadAttention(nn.Module):
         context_vec = context_vec.contiguous().view(b, num_tokens, self.emb_dim)
         return self.out_proj(context_vec)
 
-    def forward(self, x, use_cache=False, cache_positions=None):
+    def forward(self, x, use_cache=False, cache_positions=None, cache_row_indices=None):
         b, num_tokens, _ = x.shape
 
         keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)
@@ -981,7 +1085,13 @@ class MultiHeadAttention(nn.Module):
 
         if use_cache:
             if cache_positions is not None:
-                return self._forward_per_row_cache(keys_new, values_new, queries, cache_positions)
+                return self._forward_per_row_cache(
+                    keys_new,
+                    values_new,
+                    queries,
+                    cache_positions,
+                    cache_row_indices=cache_row_indices,
+                )
             self._ensure_cache_capacity(keys_new, values_new)
             start = self.ptr_current_pos
             end = start + num_tokens
@@ -1050,7 +1160,9 @@ class MultiHeadAttention(nn.Module):
         if self.cache_lengths is None:
             return
         indices = row_indices.to(device=self.cache_lengths.device, dtype=torch.long)
-        self.cache_lengths[indices] = 0
+        indices = indices[indices < self.cache_lengths.shape[0]]
+        if indices.numel() > 0:
+            self.cache_lengths[indices] = 0
 
     def compact_cache(self, active_indices: torch.Tensor):
         if self.cache_k is not None:
@@ -1179,7 +1291,15 @@ class TransformerBlock(nn.Module):
         else:
             self.hc_engram = None
     
-    def forward(self, input_ids, x, use_cache=False, engram_hashes=None, cache_positions=None):
+    def forward(
+        self,
+        input_ids,
+        x,
+        use_cache=False,
+        engram_hashes=None,
+        cache_positions=None,
+        cache_row_indices=None,
+    ):
         if self.hc_mult == 1:
             if x.dim() != 3:
                 raise ValueError("Expected [B, L, D] hidden states when hc_mult == 1")
@@ -1190,9 +1310,15 @@ class TransformerBlock(nn.Module):
                     input_ids=input_ids,
                     precomputed_hashes=engram_hashes,
                     use_cache=use_cache,
+                    cache_row_indices=cache_row_indices,
                 )
 
-            x = x + self.attn(self.norm2(x), use_cache, cache_positions=cache_positions)
+            x = x + self.attn(
+                self.norm2(x),
+                use_cache,
+                cache_positions=cache_positions,
+                cache_row_indices=cache_row_indices,
+            )
             x = x + self.ff(self.norm3(x))
             return x
 
@@ -1205,13 +1331,19 @@ class TransformerBlock(nn.Module):
                     input_ids=input_ids,
                     precomputed_hashes=engram_hashes,
                     use_cache=use_cache,
+                    cache_row_indices=cache_row_indices,
                 ),
             )
         
         # Attention + Residual Connection
         x = self.hc_attn(
             x,
-            lambda agg: self.attn(self.norm2(agg), use_cache, cache_positions=cache_positions),
+            lambda agg: self.attn(
+                self.norm2(agg),
+                use_cache,
+                cache_positions=cache_positions,
+                cache_row_indices=cache_row_indices,
+            ),
         )
 
         # FFN + Residual Connection
@@ -1301,7 +1433,15 @@ class EngramsModel(nn.Module):
         return hashes_by_device if hashes_by_device else None
 
     
-    def forward(self, input_ids, use_cache=False, position_offset=0, engram_input_ids=None, cache_positions=None):
+    def forward(
+        self,
+        input_ids,
+        use_cache=False,
+        position_offset=0,
+        engram_input_ids=None,
+        cache_positions=None,
+        cache_row_indices=None,
+    ):
         if self.block_device_map:
             input_device = self.input_device
             input_ids = move_tensor_to_device(input_ids, input_device)
@@ -1366,6 +1506,11 @@ class EngramsModel(nn.Module):
                     if cache_positions is not None
                     else None
                 )
+                local_cache_row_indices = (
+                    move_tensor_to_device(cache_row_indices, stage["device"])
+                    if cache_row_indices is not None
+                    else None
+                )
 
                 for idx in range(stage["start"], stage["end"]):
                     block = self.transformer_blocks[idx]
@@ -1375,6 +1520,7 @@ class EngramsModel(nn.Module):
                         use_cache=use_cache,
                         engram_hashes=local_hashes,
                         cache_positions=local_cache_positions,
+                        cache_row_indices=local_cache_row_indices,
                     )
         else:
             for block in self.transformer_blocks:
@@ -1384,6 +1530,7 @@ class EngramsModel(nn.Module):
                     use_cache=use_cache,
                     engram_hashes=engram_hashes,
                     cache_positions=cache_positions,
+                    cache_row_indices=cache_row_indices,
                 )
 
         if x.dim() == 4:

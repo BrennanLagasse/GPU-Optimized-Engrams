@@ -872,3 +872,28 @@
   - this is not yet full continuous batching, paged KV, or prefill/decode disaggregation
   - Engram hash/window state still needs request-level handling before Engram-enabled slot refill can be claimed correct
   - the implementation currently supports same-step width across active rows; an active-slot scheduler still needs to call it with the correct slot metadata
+
+## 2026-04-21 20:30 EDT
+
+- Implemented the next step after per-row cache positions: explicit cache slot indices and a measured continuous-refill serving path.
+- Added `cache_row_indices` support through:
+  - optimized attention KV cache
+  - Engram `ShortConv` cached state
+  - `Engram`, `TransformerBlock`, and `EngramsModel`
+- Added `scripts/benchmark_serving.py --decode-mode continuous` for `optimized_cached`.
+  - The scheduler keeps a fixed slot capacity.
+  - Completed slots are reset with `reset_cache_rows(...)`.
+  - New requests are admitted into freed slots using exact per-request prefill and then join batched decode.
+  - The realistic policy uses known input lengths only; oracle policies still exist only as diagnostics.
+- Added continuous-mode entries to `scripts/run_cluster_serving_optimization_sweep.sh`.
+- Updated `scripts/report_serving_optimization_sweep.py` so reports no longer claim continuous refill is unimplemented.
+- Added a non-contiguous slot-index correctness test for the no-Engram model path.
+- Local validation:
+  - `python -m py_compile engrams_kv_moe.py scripts/benchmark_serving.py scripts/report_serving_optimization_sweep.py test_engrams.py`
+  - `conda run -n ai_infra_env_new pytest -q test_engrams.py`: `24 passed in 73.65s`
+  - local CPU continuous smoke:
+    - `conda run -n ai_infra_env_new python scripts/benchmark_serving.py --preset tiny_engram --device-groups cpu --dtype float32 --model-impl optimized_cached --batch-size 2 --policy longest_input_first --decode-mode continuous --num-requests 5 --mean-input-tokens 8 --mean-output-tokens 6 --max-input-tokens 16 --max-output-tokens 12 --seed 7 --output results/local_continuous_smoke.json`
+    - result: `serving_wall_seconds_excluding_model_load=0.118027s`, `requested_output_tokens=30`, `executed_decode_tokens=30`
+- Remaining validation needed:
+  - run the 40B H200 continuous cases from the cluster after pushing this branch
+  - compare continuous B8/B16 against the current best measured B16 compact result

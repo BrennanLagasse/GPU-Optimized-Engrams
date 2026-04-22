@@ -106,10 +106,9 @@ def main() -> None:
             f"serving time and `{best['serving_tps']:.3f}` requested output tok/s."
         )
     lines.append(
-        "Continuous batching with true row-level refill is not included as a measured model run because "
-        "the current attention cache tracks one shared cache position per batch. A production continuous "
-        "batching implementation would need per-row cache positions or cache-page metadata before it can "
-        "safely admit new requests into completed rows without resetting the whole batch."
+        "`continuous` decode uses request-level cache slot metadata to admit a new request into a completed "
+        "slot without flushing the rest of the batch. Oracle policies remain diagnostic only because they "
+        "sort by output length, which a real serving system does not know before generation completes."
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
