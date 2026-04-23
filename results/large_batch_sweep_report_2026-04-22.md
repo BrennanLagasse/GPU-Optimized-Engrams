@@ -1,6 +1,6 @@
 # Large Batch And Stage-Cost Sweep Report
 
-Timestamp: 2026-04-22 16:45 EDT
+Timestamp: 2026-04-22 21:55 EDT
 
 ## Summary
 
@@ -8,14 +8,14 @@ The best measured realistic serving result is now:
 
 | Model | Scheduler | Replica assignment | Decoder | Batch/replica | Serving seconds | Tok/s | Speedup vs naive | Time reduction vs naive | Change vs prior best B16 compact |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 32 | `131.728` | `97.170` | `37.07x` | `97.30%` | `19.34% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 48 | `110.087` | `116.272` | `44.35x` | `97.75%` | `32.59% faster` |
 
-The prior best was `optimized_cached + longest_input_first + round_robin + compact + B16` at `163.306s`. The new B32 greedy-prefill compact result improves that by `19.34%`.
+The prior best before the focused non-power-of-two sweep was `optimized_cached + longest_input_first + greedy_prefill + compact + B32` at `131.728s`. The new B48 greedy-prefill compact result improves that by `16.43%`.
 
 The original naive baseline remains `naive + random + round_robin + static + B8` at `4882.758s`, so the new best end-to-end speedup is:
 
 ```text
-4882.758s / 131.728s = 37.07x
+4882.758s / 110.087s = 44.35x
 ```
 
 ## Methodology
@@ -61,6 +61,10 @@ Baseline for percent changes in this table:
 | `optimized_cached` | `longest_input_first` | `greedy_prefill` | `static` | 32 | `243.960` | `52.468` | `20.01x` | `95.00%` | `49.39% slower` |
 | `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 32 | `177.720` | `72.023` | `27.47x` | `96.36%` | `8.83% slower` |
 | `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 32 | `131.728` | `97.170` | `37.07x` | `97.30%` | `19.34% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 36 | `125.194` | `102.242` | `39.00x` | `97.44%` | `23.34% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 40 | `121.943` | `104.967` | `40.04x` | `97.50%` | `25.33% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 48 | `110.087` | `116.272` | `44.35x` | `97.75%` | `32.59% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 56 | `119.096` | `107.476` | `41.00x` | `97.56%` | `27.07% faster` |
 | `optimized_cached` | `longest_input_first` | `round_robin` | `continuous` | 32 | `186.199` | `68.744` | `26.22x` | `96.19%` | `14.02% slower` |
 | `optimized_cached` | `longest_input_first` | `round_robin` | `compact` | 64 | `132.731` | `96.436` | `36.79x` | `97.28%` | `18.72% faster` |
 | `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 64 | `132.517` | `96.591` | `36.85x` | `97.29%` | `18.85% faster` |
@@ -69,11 +73,32 @@ Baseline for percent changes in this table:
 
 Interpretation:
 
-- B32 compact with greedy-prefill is the measured optimum among the tested B16/B32/B64 realistic configurations.
-- B64 compact is slightly slower than B32 compact, so increasing batch size past B32 decreased serving speed.
+- The focused non-power-of-two sweep found that B48 compact with greedy-prefill is the measured optimum among the tested realistic configurations.
+- B56 and B64 compact are slower than B48 compact, so increasing batch size past B48 decreased serving speed for this workload.
 - B128 was not run because B64 already decreased and `100` requests with `BATCH_SIZE=128` would collapse into a single effective batch, leaving one replica idle.
 - Static large-batch decode is poor because decode padding and replica imbalance dominate.
 - Greedy-prefill matters more at B32 than it did at B8 because there are fewer, larger batches; one bad batch assignment can dominate makespan.
+
+## Focused Non-Power-Of-Two Sweep
+
+After B32 and B64 bracketed the likely optimum, we ran a focused sweep of non-power-of-two compact greedy-prefill batch sizes. This directly tested whether a value between B32 and B64 could better trade off GPU utilization, prefill padding, decode compaction overhead, and replica balance.
+
+| Model | Scheduler | Replica assignment | Decoder | Batch/replica | Serving seconds | Tok/s | Speedup vs naive | Time reduction vs naive | Change vs B32 greedy compact |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 24 | `167.809` | `76.279` | `29.10x` | `96.56%` | `27.39% slower` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 28 | `163.321` | `78.373` | `29.90x` | `96.66%` | `23.98% slower` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 32 | `131.728` | `97.170` | `37.07x` | `97.30%` | baseline |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 36 | `125.194` | `102.242` | `39.00x` | `97.44%` | `4.96% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 40 | `121.943` | `104.967` | `40.04x` | `97.50%` | `7.43% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 48 | `110.087` | `116.272` | `44.35x` | `97.75%` | `16.43% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 56 | `119.096` | `107.476` | `41.00x` | `97.56%` | `9.59% faster` |
+| `optimized_cached` | `longest_input_first` | `greedy_prefill` | `compact` | 64 | `132.517` | `96.591` | `36.85x` | `97.29%` | `0.60% slower` |
+
+Interpretation:
+
+- B48 is the best measured point in the focused sweep.
+- B36 and B40 show that the gain is not just noise at one value; performance improves as batch size increases past B32, peaks at B48, and then falls at B56/B64.
+- B24/B28 are near the old B16 compact result and are worse than B32, which suggests the main benefit is not simply using any non-power-of-two value. The useful region is the neighborhood where larger batches improve utilization without creating too much remaining imbalance or compaction overhead.
 
 ## Prefill/Decode Disaggregation Experiment
 
@@ -113,9 +138,23 @@ MODEL_IMPL=optimized_cached \
 POLICY=longest_input_first \
 REPLICA_ASSIGNMENT=greedy_prefill \
 DECODE_MODE=compact \
-BATCH_SIZE=32 \
-OUTPUT=results/serving_opt_sweep_optimized_input_compact_b32_greedy_prefill.json \
+BATCH_SIZE=48 \
+OUTPUT=results/serving_opt_sweep_optimized_input_compact_b48_greedy_prefill.json \
 bash scripts/run_cluster_serving_scheduling.sh
+```
+
+Focused non-power-of-two sweep command template:
+
+```bash
+for batch in 24 28 36 40 48 56; do
+  MODEL_IMPL=optimized_cached \
+  POLICY=longest_input_first \
+  REPLICA_ASSIGNMENT=greedy_prefill \
+  DECODE_MODE=compact \
+  BATCH_SIZE="$batch" \
+  OUTPUT="results/serving_opt_sweep_optimized_input_compact_b${batch}_greedy_prefill.json" \
+  bash scripts/run_cluster_serving_scheduling.sh
+done
 ```
 
 Stage-cost report:
@@ -132,4 +171,5 @@ python scripts/report_prefill_decode_stage_costs.py \
 - [proposal_checklist.md](proposal_checklist.md)
 - [paper_metrics_summary.md](paper_metrics_summary.md)
 - [best_serving_results_report_2026-04-22.md](best_serving_results_report_2026-04-22.md)
+- [focused_batch_size_sweep_report_2026-04-22.md](focused_batch_size_sweep_report_2026-04-22.md)
 - [prefill_decode_stage_costs_b32_greedy_2026-04-22.md](prefill_decode_stage_costs_b32_greedy_2026-04-22.md)

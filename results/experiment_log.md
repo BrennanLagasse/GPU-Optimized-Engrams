@@ -970,3 +970,44 @@
 - Documentation:
   - added `results/large_batch_sweep_report_2026-04-22.md`
   - updated `results/best_serving_results_report_2026-04-22.md`
+
+## 2026-04-22 21:55 EDT
+
+- Ran a focused non-power-of-two batch-size sweep on the H200 cluster after B32 and B64 bracketed the likely optimum.
+- Hardware/model/workload:
+  - `gpu003`
+  - `8 x NVIDIA H200`, two model-parallel replicas over devices `0,1,2,3` and `4,5,6,7`
+  - preset `target_40b_approx`, about `39.98B` params, dtype `bfloat16`
+  - Engram layers `[1, 15]`
+  - `100` deterministic long-tailed requests, mean input/output `128`, max input/output `1024`, total requested output `12,800`
+  - input and output lengths are independent except request `0` is forced to max input and max output length
+- Fixed settings for the sweep:
+  - `MODEL_IMPL=optimized_cached`
+  - `POLICY=longest_input_first`
+  - `REPLICA_ASSIGNMENT=greedy_prefill`
+  - `DECODE_MODE=compact`
+- Results:
+  - B24: `167.809s`, `76.279 tok/s`, `29.10x` vs naive, `27.39%` slower than B32
+  - B28: `163.321s`, `78.373 tok/s`, `29.90x` vs naive, `23.98%` slower than B32
+  - B32: `131.728s`, `97.170 tok/s`, `37.07x` vs naive, baseline for this focused comparison
+  - B36: `125.194s`, `102.242 tok/s`, `39.00x` vs naive, `4.96%` faster than B32
+  - B40: `121.943s`, `104.967 tok/s`, `40.04x` vs naive, `7.43%` faster than B32
+  - B48: `110.087s`, `116.272 tok/s`, `44.35x` vs naive, `16.43%` faster than B32
+  - B56: `119.096s`, `107.476 tok/s`, `41.00x` vs naive, `9.59%` faster than B32
+  - B64: `132.517s`, `96.591 tok/s`, `36.85x` vs naive, `0.60%` slower than B32
+- New best:
+  - `optimized_cached + longest_input_first + greedy_prefill + compact + BATCH_SIZE=48`
+  - serving time excluding model load: `110.087s`
+  - requested output throughput: `116.272 tok/s`
+  - speedup vs naive random static B8 (`4882.758s`): `44.35x`
+  - time reduction vs naive random static B8: `97.75%`
+  - improvement vs prior B16 compact best (`163.306s`): `32.59%`
+  - improvement vs prior B32 greedy compact best (`131.728s`): `16.43%`
+- Interpretation:
+  - B48 is the measured optimum among tested realistic batch sizes for this fixed 100-request workload.
+  - B36/B40/B48 improve monotonically over B32, then B56/B64 regress, so the effect is consistent with a real utilization/padding/replica-balance tradeoff.
+  - B128 remains untested because the 100-request workload would collapse into one effective batch and leave one replica idle.
+- Documentation:
+  - added `results/focused_batch_size_sweep_report_2026-04-22.md`
+  - updated `results/large_batch_sweep_report_2026-04-22.md`
+  - updated `results/best_serving_results_report_2026-04-22.md`
