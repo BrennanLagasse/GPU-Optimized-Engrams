@@ -137,6 +137,8 @@ The headline `44.35x` is computed from serving time. The numerator is the naive 
 
 Best measured realistic configuration:
 
+The single command below is sufficient to reproduce the reported result. You do not need to run any setup command beforehand for the documented default settings.
+
 ```bash
 MODEL_IMPL=optimized_cached \
 POLICY=longest_input_first \
@@ -146,6 +148,8 @@ BATCH_SIZE=48 \
 OUTPUT=results/serving_opt_sweep_optimized_input_compact_b48_greedy_prefill.json \
 bash scripts/run_cluster_serving_scheduling.sh
 ```
+
+The next block is included only to document which defaults `scripts/run_cluster_serving_scheduling.sh` uses internally for this reported run. It is not necessary to run this block separately unless you want to override or inspect those settings explicitly.
 
 Default cluster layout used by the wrapper:
 

@@ -21,6 +21,8 @@ Timestamp: 2026-04-20 22:20 EDT
 
 ## Commands
 
+Each command below is self-contained for the reported run. You do not need to run a separate setup block beforehand unless you want to override the wrapper defaults explicitly.
+
 Naive baseline:
 
 ```bash

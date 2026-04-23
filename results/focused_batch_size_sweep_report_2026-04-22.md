@@ -78,6 +78,8 @@ The likely mechanism is that B48 gives better GPU utilization than B32 while sti
 
 Best measured configuration:
 
+The single command below is sufficient to reproduce the reported best result. You do not need to run any separate setup block beforehand for the documented default settings.
+
 ```bash
 MODEL_IMPL=optimized_cached \
 POLICY=longest_input_first \
@@ -101,6 +103,8 @@ for batch in 24 28 36 40 48 56; do
   bash scripts/run_cluster_serving_scheduling.sh
 done
 ```
+
+These commands rely on the same internal defaults from `scripts/run_cluster_serving_scheduling.sh` that are documented in [best_serving_results_report_2026-04-22.md](best_serving_results_report_2026-04-22.md). You only need to set additional environment variables if you want to override those defaults explicitly.
 
 ## Related Reports
 

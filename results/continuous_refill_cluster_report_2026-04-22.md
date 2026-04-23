@@ -27,6 +27,8 @@ Model/workload:
 
 ## Commands
 
+Each command below is self-contained for the reported run. You do not need to run a separate setup block beforehand unless you want to override the wrapper defaults explicitly.
+
 Realistic continuous B16:
 
 ```bash
