@@ -66,7 +66,7 @@ def build_config(args):
         "device_map": args.device_map,
         "engrams_cfg": EngramConfig(
             tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            engram_vocab_size=args.engram_vocab_size,
+            # engram_vocab_size=args.engram_vocab_size, (Set to default)
             max_ngram_size=args.max_ngram_size,
             n_embed_per_ngram=args.n_embed_per_ngram,
             n_head_per_ngram=args.n_head_per_ngram,
@@ -101,7 +101,7 @@ def main():
     parser.add_argument("--num-experts-per-tok", type=int, default=2)
     parser.add_argument("--hc-mult", type=int, default=1)
     parser.add_argument("--layer-ids", type=int, nargs="*", default=[])
-    parser.add_argument("--engram-vocab-size", type=int, nargs="*", default=[257, 263])
+    # parser.add_argument("--engram-vocab-size", type=int, nargs="*", default=[257, 263])
     parser.add_argument("--max-ngram-size", type=int, default=3)
     parser.add_argument("--n-embed-per-ngram", type=int, default=32)
     parser.add_argument("--n-head-per-ngram", type=int, default=4)
