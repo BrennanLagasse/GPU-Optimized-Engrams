@@ -38,11 +38,11 @@ def compute_engrams_memory(model: EngramsModel):
 
     total_params = lookup_table_params
     total_mem = lookup_table_mem
-    total_mem_mbs = total_mem / 10 ** 6
+    total_mem_gbs = total_mem / 10 ** 9
 
     print(f"Lookup Table Params: {lookup_table_params}")
     print(f"Total Parameters: {total_params}")
-    print(f"Total Memory: {total_mem_mbs} MB")
+    print(f"Total Memory: {total_mem_gbs} GB")
 
     return total_mem, total_params
 
