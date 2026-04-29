@@ -131,7 +131,6 @@ def build_execution_stages(block_device_map, engram_layer_ids=None):
     })
     return stages
 
-
 def move_tensor_to_device(tensor, device):
     return tensor.to(device, non_blocking=True)
 
@@ -489,7 +488,10 @@ class NgramHashMapping:
         self._torch_cache = {}
 
     def calculate_vocab_size_across_layers(self):
-        """ Returns a dictionary indexed by layer id with entries of dim (m-1, h) """
+        """ Returns a dictionary indexed by layer id with entries of dim (m-1, h) 
+        \n The dictionary for each head has prime size starting with the vocab size and ascending
+        \n Here m=max_ngram_size and h=n_head_per_engram
+        """
 
         seen_primes = set()
         vocab_size_across_layers = {}
@@ -598,6 +600,8 @@ class NgramHashMapping:
         return hash_ids_for_all_layers
 
     def _get_torch_constants(self, device):
+        """ Load engrams params and lookup table to device if this has not occured yet (reduces unnecessary .to(device) calls) """
+
         key = str(device)
         if key not in self._torch_cache:
             layer_multipliers = {
@@ -663,6 +667,7 @@ class NgramHashMapping:
         This is used during cached decode, where the Engram block consumes a
         single hidden-state step and only needs the hashes for the newest token.
         """
+
         if input_ids.dtype != torch.long:
             input_ids = input_ids.long()
 
@@ -716,6 +721,7 @@ class MultiHeadEmbedding(nn.Module):
         self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long))
         
         # Represent the embeddings associated with all n-gram sizes, heads in one table
+        # TODO: Possibly split this up if computation remains on GPUs
         total_N = sum(list_of_N)
         self.embedding = nn.Embedding(num_embeddings=total_N, embedding_dim=D)
 
@@ -809,6 +815,12 @@ class ManifoldConstrainedHyperConnection(nn.Module):
         return pre, post, residual
 
     def forward(self, x: torch.Tensor, op):
+        """
+        Params:
+            x (tensor): input
+            op (function): function performed on aggregated input
+        """
+
         squeeze_output = False
         if x.dim() == 3:
             x = x.unsqueeze(2)
@@ -870,8 +882,9 @@ class Engram(nn.Module):
         cache_row_indices=None,
     ):
         """
-        hidden_states: [B, L, D]
-        input_ids: [B, L]
+        hidden_states: [B, L, D] - embedding of input sequence
+        input_ids: [B, L] - tokenized input sequence
+        precomputed_hashes [B, L, (M-1)*H] - hash of input sequence computed in advance
         """
         if hidden_states.dim() != 3:
             raise ValueError("Engram expects aggregated hidden states of shape [B, L, D]")
@@ -1300,6 +1313,7 @@ class TransformerBlock(nn.Module):
         cache_positions=None,
         cache_row_indices=None,
     ):
+        # Seperately handle case with trivial engrams expansion
         if self.hc_mult == 1:
             if x.dim() != 3:
                 raise ValueError("Expected [B, L, D] hidden states when hc_mult == 1")
@@ -1415,6 +1429,8 @@ class EngramsModel(nn.Module):
         return self
 
     def _prepare_engram_hashes(self, engram_input_ids, use_cache):
+        """ Compute all engram hashes in advance """
+
         if self.num_engram_layers <= 1:
             return None
 
@@ -1470,6 +1486,7 @@ class EngramsModel(nn.Module):
         if self.config["hc_mult"] > 1:
             x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
 
+        # Precompute engrams hashes if possible
         engram_hashes = None
         if engram_input_ids is None:
             engram_input_ids = input_ids
@@ -1485,6 +1502,7 @@ class EngramsModel(nn.Module):
             else:
                 engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
+        # Pass through all layers
         if self.execution_stages:
             stage_local_inputs = {}
             if torch.is_tensor(engram_input_ids):
@@ -1582,6 +1600,8 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
 
     with torch.inference_mode():
         if use_cache:
+
+            # Prefill
             logits = model(
                 input_ids,
                 use_cache=True,
@@ -1592,6 +1612,7 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
             out[:, current_len] = next_idx
             current_len += 1
 
+            # Subsequent token generation
             for _ in range(1, max_new_tokens):
                 step_input = out[:, current_len - 1:current_len]
                 engram_start = max(0, current_len - model_engrams_cfg.max_ngram_size)
