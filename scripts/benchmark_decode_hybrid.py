@@ -28,7 +28,7 @@ def build_config(args):
         "device_map": args.device_map,
         "engrams_cfg": EngramConfig(
             tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            engram_vocab_size=args.engram_vocab_size,
+            # engram_vocab_size=args.engram_vocab_size,
             max_ngram_size=args.max_ngram_size,
             n_embed_per_ngram=args.n_embed_per_ngram,
             n_head_per_ngram=args.n_head_per_ngram,
