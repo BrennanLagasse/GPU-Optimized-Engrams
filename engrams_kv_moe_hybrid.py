@@ -1510,7 +1510,7 @@ class EngramsModel(nn.Module):
         for block, device_str in zip(self.transformer_blocks, self.block_device_map):
 
             # Custom device map only needed if certain modules left on CPU
-            if self.config.offload_lookup:
+            if self.config.get("offload_lookup"):
                 block.apply_device_map(device=torch.device(device_str), dtype=dtype)
             else:
                 block.to(device=torch.device(device_str), dtype=dtype)
