@@ -94,9 +94,9 @@ def main():
     # DeepSeek evaluates in the context of a 27B param model that is not public
     # Defaults are inferred based on Qwen3.6-27B
     parser.add_argument("--vocab-size", type=int, default=129280)
-    parser.add_argument("--context-length", type=int, default=1024) 
+    parser.add_argument("--context-length", type=int, default=262144) # Qwen-27B
     parser.add_argument("--emb-dim", type=int, default=5120) # Qwen-27B
-    parser.add_argument("--hidden-dim", type=int, default=17408) # Qwen3-27B
+    parser.add_argument("--hidden-dim", type=int, default=8192)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=64) # Qwen3-27B
     parser.add_argument("--num-experts", type=int, default=0)
