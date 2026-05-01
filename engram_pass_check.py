@@ -18,6 +18,14 @@ DTYPE_BYTES = {
     "int8": 1,
 }
 
+def profile_module(model):
+    """ Compute memory use of module. Returns parameter count and memory (in GBs) """
+
+    param_count = sum(p.numel() for p in model.parameters())
+    mem_bytes = sum(p.numel() * DTYPE_BYTES[str(p.dtype)] for p in model.parameters()) / 10 ** 9
+
+    return param_count, mem_bytes
+
 def compute_engrams_memory(model: EngramsModel):
     """ Compute the size of the Engrams lookup table """
 
@@ -34,8 +42,6 @@ def compute_engrams_memory(model: EngramsModel):
             lookup_table_mem += bytes_per_param * num_params
             lookup_table_params += num_params
 
-    
-
     total_params = lookup_table_params
     total_mem = lookup_table_mem
     total_mem_gbs = total_mem / 10 ** 9
@@ -46,8 +52,26 @@ def compute_engrams_memory(model: EngramsModel):
 
     return total_mem, total_params
 
+def profile_engrams(engram_model: EngramsModel):
+    """ Compute total memory overhead for the model """
 
+    total_param_count, total_mem_gbs = profile_module(engram_model)
 
+    table_param_count, table_mem_gbs = 0, 0
+    
+    for block in engram_model.transformer_blocks:
+        if block.engram:
+            params, mem = profile_module(block.engram.multi_head_embedding.embedding)
+            table_param_count += params
+            table_mem_gbs += mem
+
+    param_ratio = total_param_count / table_param_count * 100
+    mem_ratio = table_mem_gbs / total_mem_gbs * 100
+
+    print(f"Model Params: {total_param_count}")
+    print(f"Lookup Table Params: {table_param_count} ({param_ratio:.2f}% are allocated to the lookup table)")
+    print(f"Model Memory: {total_mem_gbs} GBs")
+    print(f"Lookup Table Memory: {table_mem_gbs} GBs ({mem_ratio:.2f}% is allocated to the lookup table)")
 
 def build_config(args):
     return {
@@ -66,7 +90,7 @@ def build_config(args):
         "device_map": args.device_map,
         "engrams_cfg": EngramConfig(
             tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            # engram_vocab_size=args.engram_vocab_size, (Set to default)
+            # engram_vocab_size=[250, 250],
             max_ngram_size=args.max_ngram_size,
             n_embed_per_ngram=args.n_embed_per_ngram,
             n_head_per_ngram=args.n_head_per_ngram,
@@ -146,10 +170,16 @@ def main():
     
 
     print(f"Device: {device}")
+
+    
     print(f"Total time: {duration}")
     print(f"Time per input: {avg_duration}")
 
+    print("\n", "="*30, "\nMemory Profile\n", "="*30)
+
     compute_engrams_memory(model)
+    print()
+    profile_engrams(model)
 
 
 if __name__ == "__main__":
