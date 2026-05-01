@@ -874,8 +874,6 @@ class Engram(nn.Module):
         self.key_proj = nn.Linear(engram_hidden_size, self.model_dim)
         self.key_norm = nn.RMSNorm(self.model_dim)
         self.query_norm = nn.RMSNorm(self.model_dim)
-
-        self.device = None
     
     def forward(
         self,
@@ -910,8 +908,7 @@ class Engram(nn.Module):
             embeddings = precomputed_embeddings
 
         # Map result to appropriate GPU
-        if self.config.offload_lookup:
-            embeddings = embeddings.to(self.device)
+        embeddings = embeddings.to(device)
         
         # Concatenate all embeddings for n-grams starting at each token (b, t, (m-1)*h*d)
         embeddings = embeddings.flatten(start_dim=-2)
@@ -962,8 +959,6 @@ class Engram(nn.Module):
         self.key_proj.to(device=torch.device(device_str), dtype=dtype)
         self.key_norm.to(device=torch.device(device_str), dtype=dtype)
         self.query_norm.to(device=torch.device(device_str), dtype=dtype)
-
-        self.device = torch.device(device_str)
 
     def precompute_embeddings(self, input_ids, precomputed_hashes=None, use_cache=False):
         """ 
