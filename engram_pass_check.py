@@ -42,8 +42,8 @@ def profile_engrams(engram_model: EngramsModel):
     param_ratio = table_param_count / total_param_count * 100
     mem_ratio = table_mem_gbs / total_mem_gbs * 100
 
-    print(f"Model Params: {total_param_count}")
-    print(f"Lookup Table Params: {table_param_count} ({param_ratio:.2f}% are allocated to the lookup table)")
+    print(f"Model Params: {total_param_count / 10 ** 9}B")
+    print(f"Lookup Table Params: {table_param_count / 10 ** 9}B ({param_ratio:.2f}% are allocated to the lookup table)")
     print(f"Model Memory: {total_mem_gbs} GBs")
     print(f"Lookup Table Memory: {table_mem_gbs} GBs ({mem_ratio:.2f}% is allocated to the lookup table)")
 
@@ -80,7 +80,7 @@ def build_config(args):
 def main():
     parser = argparse.ArgumentParser()
 
-    # Choices match Dense-27B (as in Engram-32B) (a few exceptions)
+    
     parser.add_argument("--impl", choices=["optimized", "naive"], default="optimized")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--device-map", type=str, default="")
@@ -90,21 +90,24 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--use-cache", action="store_true")
+
+    # DeepSeek evaluates in the context of a 27B param model that is not public
+    # Defaults are inferred based on Qwen3.6-27B
     parser.add_argument("--vocab-size", type=int, default=129280)
-    parser.add_argument("--context-length", type=int, default=256)
-    parser.add_argument("--emb-dim", type=int, default=128)
-    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--context-length", type=int, default=262144) 
+    parser.add_argument("--emb-dim", type=int, default=5120) # Qwen-27B
+    parser.add_argument("--hidden-dim", type=int, default=17408) # Qwen3-27B
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=64)
+    parser.add_argument("--n-layers", type=int, default=64) # Qwen3-27B
     parser.add_argument("--num-experts", type=int, default=0)
     parser.add_argument("--num-experts-per-tok", type=int, default=2)
 
     # Defaults follow Engram-32B model setup
     parser.add_argument("--hc-mult", type=int, default=4)
     parser.add_argument("--layer-ids", type=int, nargs="*", default=[1, 14])
-    parser.add_argument("--max-ngram-size", type=int, default=3)
+    parser.add_argument("--max-ngram-size", type=int, default=3) 
     parser.add_argument("--n-embed-per-ngram", type=int, default=1280)
-    parser.add_argument("--n-head-per-ngram", type=int, default=8)
+    parser.add_argument("--n-head-per-ngram", type=int, default=8) 
 
     parser.add_argument("--kernel-size", type=int, default=2)
     parser.add_argument("--disable-short-conv", action="store_true")
