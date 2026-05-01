@@ -99,6 +99,8 @@ def main():
     dtype = getattr(torch, args.dtype)
     config = build_config(args)
     model_cls = EngramsModel if args.impl == "optimized" else NaiveEngramsModel
+
+    print("Initializing model...")
     model = model_cls(config)
     if device_map:
         model.apply_device_map(dtype=dtype)
@@ -112,6 +114,7 @@ def main():
         dtype=torch.long,
     )
 
+    print("Evaluating...")
     durations = []
     for _ in range(args.trials):
         if device.type == "cuda":
