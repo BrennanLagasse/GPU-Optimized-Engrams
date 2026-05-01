@@ -874,44 +874,44 @@ class Engram(nn.Module):
         self.key_proj = nn.Linear(engram_hidden_size, self.model_dim)
         self.key_norm = nn.RMSNorm(self.model_dim)
         self.query_norm = nn.RMSNorm(self.model_dim)
+
+        self.device = None
     
     def forward(
         self,
         hidden_states,
         input_ids,
+        precomputed_embeddings=None,
         precomputed_hashes=None,
         use_cache=False,
         cache_row_indices=None,
     ):
         """
-        hidden_states: [B, L, D] - embedding of input sequence
-        input_ids: [B, L] - tokenized input sequence
-        precomputed_hashes [B, L, (M-1)*H] - hash of input sequence computed in advance
+        Compute a new representation of the input based on learned representations of n-grams
+
+        Params:
+            hidden_states: [B, L, D] - embedding of input sequence
+            input_ids: [B, L] - tokenized input sequence
+            precomputed_hashes [B, L, (M-1)*H] - hash of input sequence (if precomputed, else None)
+            precomputed_embeddings [B, L, (M-1)*H, D] - embedding of sequence (if precomputed, else None)
+
+        Output
+            tensor: [B, L, D]
         """
         if hidden_states.dim() != 3:
             raise ValueError("Engram expects aggregated hidden states of shape [B, L, D]")
 
         device = hidden_states.device
 
-        # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
-        if precomputed_hashes is None:
-            if torch.is_tensor(input_ids):
-                if use_cache and hidden_states.shape[1] == 1:
-                    hash_values = self.hash_mapping.hash_last_tensor(input_ids)[self.layer_id]
-                else:
-                    hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
-            else:
-                hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
+        # Handle when embeddings are not precomputed
+        if precomputed_embeddings is None:
+            embeddings = self.precompute_embeddings(input_ids, precomputed_hashes, use_cache)
         else:
-            hash_values = precomputed_hashes[self.layer_id]
+            embeddings = precomputed_embeddings
 
-        if torch.is_tensor(hash_values):
-            hash_input_ids = hash_values[:, -hidden_states.shape[1]:, :].to(device=device, dtype=torch.long)
-        else:
-            hash_input_ids = torch.from_numpy(hash_values[:, -hidden_states.shape[1]:, :]).to(device)
-
-        # Retrieve embeddings corresponding with hashes (b, t, (m-1)*h, d)
-        embeddings = self.multi_head_embedding(hash_input_ids)
+        # Map result to appropriate GPU
+        if self.config.offload_lookup:
+            embeddings = embeddings.to(self.device)
         
         # Concatenate all embeddings for n-grams starting at each token (b, t, (m-1)*h*d)
         embeddings = embeddings.flatten(start_dim=-2)
@@ -947,6 +947,64 @@ class Engram(nn.Module):
 
         output = short_conv_input + short_conv_out
         return output.squeeze(2)
+
+    def apply_device_map(self, device_str, dtype):
+        """ Map Engrams to device and leave CPU operations on CPU """
+
+        # CPU operations
+        # TODO: This should default to CPU so I don't think it needs any explicit map, but review.
+        # self.NgramHashMapping
+        # self.MultiHeadEmbedding
+
+        # GPU operations
+        self.short_conv.to(device=torch.device(device_str), dtype=dtype)
+        self.value_proj.to(device=torch.device(device_str), dtype=dtype)
+        self.key_proj.to(device=torch.device(device_str), dtype=dtype)
+        self.key_norm.to(device=torch.device(device_str), dtype=dtype)
+        self.query_norm.to(device=torch.device(device_str), dtype=dtype)
+
+        self.device = torch.device(device_str)
+
+    def precompute_embeddings(self, input_ids, precomputed_hashes=None, use_cache=False):
+        """ 
+        Compute the embeddings of each n-gram from the input_ids (first half of the forward pass)
+        Note this is implemented for each Engram layer seperately for timing reasons.
+        
+        Params:
+            input_ids: [B, L] - tokenized input sequence
+            precomputed_hashes [B, L, (M-1)*H] - hash of input sequence (if precomputed, else None)
+            use_cache (bool) - True if KV-caching is used
+
+        Output
+            tensor: [B, L, (M-1)*H, D]
+
+        If config.offload_lookup = True, this is all performed on the CPU and the output is on the CPU
+
+        """
+
+        seq_len = input_ids.shape[1]
+
+        # Retrieve the hashing of all n-grams associated with the given layer (b, t, (m-1)*h)
+        if precomputed_hashes is None:
+            if torch.is_tensor(input_ids):
+                if use_cache and not seq_len:
+                    hash_values = self.hash_mapping.hash_last_tensor(input_ids)[self.layer_id]
+                else:
+                    hash_values = self.hash_mapping.hash_tensor(input_ids)[self.layer_id]
+            else:
+                hash_values = self.hash_mapping.hash(input_ids)[self.layer_id]
+        else:
+            hash_values = precomputed_hashes[self.layer_id]
+
+        if torch.is_tensor(hash_values):
+            hash_input_ids = hash_values[:, -seq_len:, :]
+        else:
+            hash_input_ids = torch.from_numpy(hash_values[:, -seq_len:, :])
+
+        # Retrieve embeddings corresponding with hashes (B, L, (M-1)*H, D)
+        embeddings = self.multi_head_embedding(hash_input_ids)
+
+        return embeddings
 
     def reset_cache(self):
         if self.short_conv is not None:
@@ -1324,6 +1382,7 @@ class TransformerBlock(nn.Module):
                 x = x + self.engram(
                     hidden_states=self.norm1(x),
                     input_ids=input_ids,
+                    precomputed_embeddings=None,
                     precomputed_hashes=engram_hashes,
                     use_cache=use_cache,
                     cache_row_indices=cache_row_indices,
@@ -1345,6 +1404,7 @@ class TransformerBlock(nn.Module):
                 lambda agg: self.engram(
                     hidden_states=self.norm1(agg),
                     input_ids=input_ids,
+                    precomputed_embeddings=None,
                     precomputed_hashes=engram_hashes,
                     use_cache=use_cache,
                     cache_row_indices=cache_row_indices,
@@ -1366,6 +1426,25 @@ class TransformerBlock(nn.Module):
         x = self.hc_ff(x, lambda agg: self.ff(self.norm3(agg)))
 
         return x
+
+    def apply_device_map(self, device_str, dtype=None):
+        """ Map transformer block to device (excluding CPU-specific operations) """
+
+        # If no engrams, map as standard
+        if self.engram is None:
+            self.to(device=torch.device(device_str), dtype=dtype)
+            return
+        
+        # If engrams is used, map everything to device except Engrams, which is custom
+        self.attn.to(device=torch.device(device_str), dtype=dtype)
+        self.ff.to(device=torch.device(device_str), dtype=dtype)
+        self.norm1.to(device=torch.device(device_str), dtype=dtype)
+        self.norm2.to(device=torch.device(device_str), dtype=dtype)
+        self.norm3.to(device=torch.device(device_str), dtype=dtype)
+        self.hc_attn.to(device=torch.device(device_str), dtype=dtype)
+        self.hc_engram.to(device=torch.device(device_str), dtype=dtype)
+        self.engram.apply_device_map(device_str, dtype)
+
 
     def reset_cache(self):
         self.attn.reset_cache()
@@ -1417,23 +1496,37 @@ class EngramsModel(nn.Module):
 
         self.executor = ThreadPoolExecutor(max_workers=2)
 
-    
 
     def apply_device_map(self, dtype=None):
+        """ Move operations to appropriate devices """
+
         if not self.block_device_map:
             return self
 
         embed_device = torch.device(self.block_device_map[0])
         head_device = torch.device(self.block_device_map[-1])
+
+        # Tokenization, positional encoding all on first GPU
         self.token_embed.to(device=embed_device, dtype=dtype)
         self.pos_embed.to(device=embed_device, dtype=dtype)
         self.drop_emb.to(device=embed_device)
+
+        # Map transformer blocks to appropriate GPUs (with CPU handling)
         for block, device_str in zip(self.transformer_blocks, self.block_device_map):
-            block.to(device=torch.device(device_str), dtype=dtype)
+
+            # Custom device map only needed if certain modules left on CPU
+            if self.config.offload_lookup:
+                block.apply_device_map(device=torch.device(device_str), dtype=dtype)
+            else:
+                block.to(device=torch.device(device_str), dtype=dtype)
+
+        # Normalization and projection head all on last GPU 
         self.final_norm.to(device=head_device, dtype=dtype)
         self.out_head.to(device=head_device, dtype=dtype)
+
         self.input_device = embed_device
         self.output_device = head_device
+
         return self
 
     def _prepare_engram_hashes(self, engram_input_ids, use_cache):
@@ -1455,7 +1548,7 @@ class EngramsModel(nn.Module):
             else:
                 hashes_by_device[device_str] = block.engram.hash_mapping.hash_tensor(local_ids)
         return hashes_by_device if hashes_by_device else None
-    
+
     def forward(
         self,
         input_ids,
@@ -1599,8 +1692,6 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
         use_cache (bool)
     """
 
-    # TODO: look into CUDA synchronization
-
     model.eval()
     model.reset_cache()
     model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg", engram_cfg)
@@ -1682,6 +1773,12 @@ def main():
         default=2,
         help="Number of routed experts per token when MoE is enabled.",
     )
+    parser.add_argument(
+        "--offload_lookup",
+        type=bool,
+        default=False,
+        help="True if lookup table is offloaded to CPU",
+    )
     args = parser.parse_args()
 
     text = "Hello, I am"
@@ -1708,7 +1805,8 @@ def main():
         "num_experts_per_tok": args.num_experts_per_tok if args.num_experts > 0 else 0,
         "hc_mult": 1,                                           # Branching factor for HC (> 1 when HC is used)
         "layer_ids": [1],                                       # A list of which layers have engram block
-        "engrams_cfg": engram_cfg
+        "engrams_cfg": engram_cfg,
+        "offload_lookup": args.offload_lookup,
     }
 
     model = EngramsModel(config)
