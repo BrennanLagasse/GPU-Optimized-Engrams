@@ -1442,6 +1442,7 @@ class TransformerBlock(nn.Module):
         self.norm2.to(device=torch.device(device_str), dtype=dtype)
         self.norm3.to(device=torch.device(device_str), dtype=dtype)
         self.hc_attn.to(device=torch.device(device_str), dtype=dtype)
+        self.hc_ff.to(device=torch.device(device_str), dtype=dtype)
         self.hc_engram.to(device=torch.device(device_str), dtype=dtype)
         self.engram.apply_device_map(device_str, dtype)
 

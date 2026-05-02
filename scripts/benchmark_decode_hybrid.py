@@ -86,7 +86,7 @@ def main():
 
     # Whether to offload lookup table to GPU
     parser.add_argument(
-        "--offload_lookup",
+        "--offload-lookup",
         action="store_true",
         help="True if lookup table is offloaded to CPU",
     )
