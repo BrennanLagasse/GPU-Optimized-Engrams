@@ -7,8 +7,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg, generate_text
-from engrams_naive import NaiveEngramsModel, generate_text_naive
+from engrams_kv_moe import EngramConfig, EngramsModel, engram_cfg
+from engrams_naive import NaiveEngramsModel
 
 DTYPE_BYTES = {
     "torch.float32": 4,

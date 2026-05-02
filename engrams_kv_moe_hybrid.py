@@ -1561,8 +1561,12 @@ class EngramsModel(nn.Module):
         cache_row_indices=None,
     ):
         
-        # Before and GPU-based computation initialize CPU-based computation
+        engram_hashes = None
+        if engram_input_ids is None:
+            engram_input_ids = input_ids
+        
         if self.config.get("offload_lookup"):
+            # If lookup offloaded to CPU, can be performed fully async, start now
 
             for i in self.config.get("layer_ids"):
                 engram_block = self.transformer_blocks[i].engram
@@ -1573,6 +1577,20 @@ class EngramsModel(nn.Module):
                     None,
                     use_cache
                 )
+        else:
+            # If computation is not offloaded, hashes still need to be computed 
+
+            if self.block_device_map:
+                engram_hashes = self._prepare_engram_hashes(engram_input_ids, use_cache)
+            elif self.num_engram_layers > 1:
+                first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
+                if torch.is_tensor(engram_input_ids):
+                    if use_cache and input_ids.shape[1] == 1:
+                        engram_hashes = first_engram.hash_mapping.hash_last_tensor(engram_input_ids)
+                    else:
+                        engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
+                else:
+                    engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
 
         if self.block_device_map:
             input_device = self.input_device
@@ -1601,22 +1619,6 @@ class EngramsModel(nn.Module):
 
         if self.config["hc_mult"] > 1:
             x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
-
-        # Precompute engrams hashes if possible
-        engram_hashes = None
-        if engram_input_ids is None:
-            engram_input_ids = input_ids
-        if self.block_device_map:
-            engram_hashes = self._prepare_engram_hashes(engram_input_ids, use_cache)
-        elif self.num_engram_layers > 1:
-            first_engram = next(block.engram for block in self.transformer_blocks if block.engram is not None)
-            if torch.is_tensor(engram_input_ids):
-                if use_cache and input_ids.shape[1] == 1:
-                    engram_hashes = first_engram.hash_mapping.hash_last_tensor(engram_input_ids)
-                else:
-                    engram_hashes = first_engram.hash_mapping.hash_tensor(engram_input_ids)
-            else:
-                engram_hashes = first_engram.hash_mapping.hash(engram_input_ids)
         
         # Pass through all layers
         if self.execution_stages:

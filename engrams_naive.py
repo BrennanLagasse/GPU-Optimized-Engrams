@@ -13,7 +13,6 @@ import torch.nn as nn
 
 from engrams_kv_moe import (
     DenseFeedForward,
-    EngramConfig,
     LayerNorm,
     MoEFeedForward,
     MultiHeadAttention,
