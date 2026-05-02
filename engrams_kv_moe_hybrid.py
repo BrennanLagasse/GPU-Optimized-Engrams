@@ -991,10 +991,15 @@ class Engram(nn.Module):
         else:
             hash_values = precomputed_hashes[self.layer_id]
 
+        # Convert to tensor
         if torch.is_tensor(hash_values):
             hash_input_ids = hash_values[:, -seq_len:, :]
         else:
             hash_input_ids = torch.from_numpy(hash_values[:, -seq_len:, :])
+
+        # Move to device of embeddings
+        emb_device = next(self.multi_head_embedding.parameters()).device
+        hash_input_ids = hash_input_ids.to(emb_device)
 
         # Retrieve embeddings corresponding with hashes (B, L, (M-1)*H, D)
         embeddings = self.multi_head_embedding(hash_input_ids)
