@@ -1564,7 +1564,7 @@ class EngramsModel(nn.Module):
         # Before and GPU-based computation initialize CPU-based computation
         if self.config.get("offload_lookup"):
 
-            for i in self.config.layer_ids:
+            for i in self.config.get("layer_ids"):
                 engram_block = self.transformer_blocks[i].engram
 
                 engram_block.cpu_future = self.executor.submit(
