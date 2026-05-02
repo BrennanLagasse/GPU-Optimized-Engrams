@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 
 
 def attention_params(emb_dim, qkv_bias):
