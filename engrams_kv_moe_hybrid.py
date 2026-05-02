@@ -874,6 +874,9 @@ class Engram(nn.Module):
         self.key_proj = nn.Linear(engram_hidden_size, self.model_dim)
         self.key_norm = nn.RMSNorm(self.model_dim)
         self.query_norm = nn.RMSNorm(self.model_dim)
+
+        # Reference to precomputation job, if applicable
+        self.cpu_future = None
     
     def forward(
         self,
@@ -902,10 +905,10 @@ class Engram(nn.Module):
         device = hidden_states.device
 
         # Handle when embeddings are not precomputed
-        if precomputed_embeddings is None:
+        if self.cpu_future is None:
             embeddings = self.precompute_embeddings(input_ids, precomputed_hashes, use_cache)
         else:
-            embeddings = precomputed_embeddings
+            embeddings = self.cpu_future.result().to(device)
 
         # Map result to appropriate GPU
         embeddings = embeddings.to(device)
@@ -1493,8 +1496,6 @@ class EngramsModel(nn.Module):
         if self.block_device_map:
             self.apply_device_map()
 
-        self.engrams_precompute_tasks = []
-
         self.executor = ThreadPoolExecutor(max_workers=2)
 
 
@@ -1561,12 +1562,17 @@ class EngramsModel(nn.Module):
     ):
         
         # Before and GPU-based computation initialize CPU-based computation
-        cpu_device = input_ids.detach().cpu()
+        if self.config.offload_lookup:
 
-        cpu_tasks = [
-            self.executor.submit(precompute_task, cpu_device)
-            for precompute_task in self.engrams_precompute_tasks
-        ]
+            for i in self.config.layer_ids:
+                engram_block = self.transformer_blocks[i].engram
+
+                engram_block.cpu_future = self.executor.submit(
+                    engram_block.precompute_embeddings, 
+                    input_ids.detach().cpu(),
+                    None,
+                    use_cache
+                )
 
         if self.block_device_map:
             input_device = self.input_device
