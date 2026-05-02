@@ -7,7 +7,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engrams_kv_moe_hybrid import EngramConfig, EngramsModel, engram_cfg, generate_text
+from engrams_kv_moe_hybrid import (
+    EngramConfig, 
+    EngramsModel,  
+    generate_text,
+    config_parser
+)
 from engrams_naive import NaiveEngramsModel, generate_text_naive
 
 from tqdm import tqdm
@@ -48,6 +53,7 @@ def build_config(args):
 def main():
     parser = argparse.ArgumentParser()
 
+    # CLI arguments
     parser.add_argument("--impl", choices=["optimized", "naive"], default="optimized")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--device-map", type=str, default="")
@@ -57,48 +63,54 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--use-cache", action="store_true")
-
-    # DeepSeek evaluates in the context of a 27B param model that is not public
-    # Defaults are inferred based on Qwen3.6-27B
-    parser.add_argument("--vocab-size", type=int, default=129280)
-    parser.add_argument("--context-length", type=int, default=262144) # Qwen-27B
-    parser.add_argument("--emb-dim", type=int, default=256) # Qwen-27B
-    parser.add_argument("--hidden-dim", type=int, default=1024)
-    parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=64) # Qwen3-27B
-    parser.add_argument("--num-experts", type=int, default=0)
-    parser.add_argument("--num-experts-per-tok", type=int, default=2)
-
-    # Defaults follow Engram-32B model setup
-    parser.add_argument("--hc-mult", type=int, default=4)
-    parser.add_argument("--layer-ids", type=int, nargs="*", default=[1, 14])
-    parser.add_argument("--max-ngram-size", type=int, default=3) 
-    parser.add_argument("--n-embed-per-ngram", type=int, default=1280)
-    parser.add_argument("--n-head-per-ngram", type=int, default=8) 
-
-    parser.add_argument("--kernel-size", type=int, default=2)
-    parser.add_argument("--disable-short-conv", action="store_true")
-    parser.add_argument(
-        "--cached-inference-short-conv-mode",
-        choices=["full", "step_kernel", "gated_value_only"],
-        default="step_kernel",
-    )
-
-    # Whether to offload lookup table to GPU
     parser.add_argument(
         "--offload-lookup",
         action="store_true",
         help="True if lookup table is offloaded to CPU",
     )
 
+    # DeepSeek evaluates in the context of a 27B param model that is not public
+    # Defaults are inferred based on Qwen3.6-27B
+    # parser.add_argument("--vocab-size", type=int, default=129280)
+    # parser.add_argument("--context-length", type=int, default=262144) # Qwen-27B
+    # parser.add_argument("--emb-dim", type=int, default=256) # Qwen-27B
+    # parser.add_argument("--hidden-dim", type=int, default=1024)
+    # parser.add_argument("--n-heads", type=int, default=4)
+    # parser.add_argument("--n-layers", type=int, default=64) # Qwen3-27B
+    # parser.add_argument("--num-experts", type=int, default=0)
+    # parser.add_argument("--num-experts-per-tok", type=int, default=2)
+
+    # # Defaults follow Engram-32B model setup
+    # parser.add_argument("--hc-mult", type=int, default=4)
+    # parser.add_argument("--layer-ids", type=int, nargs="*", default=[1, 14])
+    # parser.add_argument("--max-ngram-size", type=int, default=3) 
+    # parser.add_argument("--n-embed-per-ngram", type=int, default=1280)
+    # parser.add_argument("--n-head-per-ngram", type=int, default=8) 
+
+    # parser.add_argument("--kernel-size", type=int, default=2)
+    # parser.add_argument("--disable-short-conv", action="store_true")
+    # parser.add_argument(
+    #     "--cached-inference-short-conv-mode",
+    #     choices=["full", "step_kernel", "gated_value_only"],
+    #     default="step_kernel",
+    # )
+
+    parser.add_argument("--config", type=str, help="Path to config file")
+
+    # Whether to offload lookup table to GPU
+    
+
     args = parser.parse_args()
+
+    # Load in config from file
+    config = config_parser(args.config)
 
     torch.manual_seed(0)
     device_map = [entry.strip() for entry in args.device_map.split(",") if entry.strip()]
     args.device_map = device_map
     device = torch.device(device_map[0] if device_map else args.device)
     dtype = getattr(torch, args.dtype)
-    config = build_config(args)
+    # config = build_config(args)
     model_cls = EngramsModel if args.impl == "optimized" else NaiveEngramsModel
 
     print("Initializing model...")

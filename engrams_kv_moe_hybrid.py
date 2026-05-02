@@ -8,7 +8,7 @@ Pre-norm residual units (to be replaced by mHC in later version)
 """
 
 from typing import List, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 import argparse
 
@@ -22,25 +22,45 @@ from tokenizers import normalizers, Regex
 
 from concurrent.futures import ThreadPoolExecutor
 
+import yaml
+
 @dataclass
 class EngramConfig:
-    tokenizer_name_or_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    engram_vocab_size: List[int] = field(default_factory=lambda: [129280*2, 129280*2])
-    max_ngram_size: int = 3
-    n_embed_per_ngram: int = 512
-    n_head_per_ngram: int = 8
-    layer_ids: List[int] = field(default_factory=lambda: [1, 15])
-    pad_id: int = 2
-    seed: int = 0
-    kernel_size: int = 4
-    use_short_conv: bool = True
-    cached_inference_short_conv_mode: str = "step_kernel"
-    
-engram_cfg = EngramConfig()
+    tokenizer_name_or_path: str
+    engram_vocab_size: List[int]
+    max_ngram_size: int
+    n_embed_per_ngram: int
+    n_head_per_ngram: int
+    pad_id: int
+    seed: int
+    kernel_size: int
+    use_short_conv: bool
+    cached_inference_short_conv_mode: str
 
-def config_parser():
+@dataclass
+class Config:
+    vocab_size: int
+    context_length: int
+    emb_dim: int
+    hidden_dim: int
+    n_heads: int
+    n_layers: int
+    num_experts: int
+    num_experts_per_tok: int
+    hc_mult: int
+    layer_ids: List[int]
+    engrams_cfg: EngramConfig
+    device_map: List[str]
+
+def config_parser(cfg_path):
     """ Given a yaml of the config gnerate a config instance """
-    pass
+    
+    data = yaml.safe_load(open(cfg_path))
+    print(data["engrams_cfg"])
+    data["engrams_cfg"] = EngramConfig(**data["engrams_cfg"])
+    cfg = Config(**data)
+
+    return cfg
 
 def estimate_block_weights(n_layers, layer_ids=None, hc_mult=1):
     engram_layers = set(layer_ids or [])
@@ -843,8 +863,8 @@ class Engram(nn.Module):
         super().__init__()
 
         self.layer_id = layer_id
-        self.model_dim = config["emb_dim"]
-        self.engram_cfg = config.get("engrams_cfg", engram_cfg)
+        self.model_dim = config.emb_dim
+        self.engram_cfg = config.engrams_cfg
 
         self.hash_mapping = NgramHashMapping(
             engram_vocab_size=self.engram_cfg.engram_vocab_size,
@@ -1025,9 +1045,9 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.emb_dim = config["emb_dim"]
-        self.num_heads = config["n_heads"]
-        self.qkv_bias = config["qkv_bias"]
+        self.emb_dim = config.emb_dim
+        self.num_heads = config.n_heads
+        self.qkv_bias = config.qkv_bias
 
         assert self.emb_dim % self.num_heads == 0, "d_out must be divisible by num_heads"
 
@@ -1037,13 +1057,13 @@ class MultiHeadAttention(nn.Module):
         self.W_key = nn.Linear(self.emb_dim, self.emb_dim, bias=self.qkv_bias)
         self.W_value = nn.Linear(self.emb_dim, self.emb_dim, bias=self.qkv_bias)
         self.out_proj = nn.Linear(self.emb_dim, self.emb_dim)  # Linear layer to combine head outputs
-        self.dropout = nn.Dropout(config["drop_rate"])
+        self.dropout = nn.Dropout(config.drop_rate)
 
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
         self.register_buffer("cache_lengths", None, persistent=False)
         self.ptr_current_pos = 0
-        self.cache_capacity = config["context_length"]
+        self.cache_capacity = config.context_length
 
     def _ensure_cache_capacity(self, keys_new, values_new, required=None, required_rows=None):
         batch_size, num_tokens, _, _ = keys_new.shape
@@ -1349,21 +1369,21 @@ class LayerNorm(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, config, layer_id):
         super().__init__()
-        self.hc_mult = config["hc_mult"]
+        self.hc_mult = config.hc_mult
         self.attn = MultiHeadAttention(config)
         if config["num_experts"] > 0:
             self.ff = MoEFeedForward(config)
         else:
             self.ff = DenseFeedForward(config)
-        self.norm1 = LayerNorm(config["emb_dim"])
-        self.norm2 = LayerNorm(config["emb_dim"])
-        self.norm3 = LayerNorm(config["emb_dim"])
-        self.hc_attn = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
-        self.hc_ff = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+        self.norm1 = LayerNorm(config.emb_dim)
+        self.norm2 = LayerNorm(config.emb_dim)
+        self.norm3 = LayerNorm(config.emb_dim)
+        self.hc_attn = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
+        self.hc_ff = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
         self.engram = None
         if layer_id in config["layer_ids"]:
             self.engram = Engram(config=config, layer_id=layer_id)
-            self.hc_engram = ManifoldConstrainedHyperConnection(config["hc_mult"], config["emb_dim"])
+            self.hc_engram = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
         else:
             self.hc_engram = None
     
@@ -1469,30 +1489,30 @@ class EngramsModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.engram_layer_ids = set(config["layer_ids"])
+        self.engram_layer_ids = set(config.layer_ids)
         self.block_device_map = normalize_device_map(
-            config.get("device_map"),
-            config["n_layers"],
-            layer_ids=config.get("layer_ids"),
-            hc_mult=config.get("hc_mult", 1),
+            config.device_map,
+            config.n_layers,
+            layer_ids=config.layer_ids,
+            hc_mult=config.hc_mult,
         )
         self.execution_stages = build_execution_stages(
             self.block_device_map,
-            engram_layer_ids=config.get("layer_ids"),
+            engram_layer_ids=config.layer_ids,
         )
         self.input_device = torch.device(self.block_device_map[0]) if self.block_device_map else None
         self.output_device = torch.device(self.block_device_map[-1]) if self.block_device_map else None
 
-        self.token_embed = nn.Embedding(config["vocab_size"], config["emb_dim"])
-        self.pos_embed = nn.Embedding(config["context_length"], config["emb_dim"]) 
-        self.drop_emb = nn.Dropout(config["drop_rate"])
+        self.token_embed = nn.Embedding(config.vocab_size, config.emb_dim)
+        self.pos_embed = nn.Embedding(config.context_length, config.emb_dim) 
+        self.drop_emb = nn.Dropout(config.drop_rate)
 
         self.transformer_blocks = nn.ModuleList(
-            [TransformerBlock(config, layer_id=id) for id in range(config["n_layers"])]
+            [TransformerBlock(config, layer_id=id) for id in range(config.n_layers)]
         )
         self.num_engram_layers = sum(1 for block in self.transformer_blocks if block.engram is not None)
-        self.final_norm = LayerNorm(config["emb_dim"])
-        self.out_head = nn.Linear(config["emb_dim"], config["vocab_size"], bias=False)
+        self.final_norm = LayerNorm(config.emb_dim)
+        self.out_head = nn.Linear(config.emb_dim, config.vocab_size, bias=False)
         if self.block_device_map:
             self.apply_device_map()
 
@@ -1517,7 +1537,7 @@ class EngramsModel(nn.Module):
         for block, device_str in zip(self.transformer_blocks, self.block_device_map):
 
             # Custom device map only needed if certain modules left on CPU
-            if self.config.get("offload_lookup"):
+            if self.config.offload_lookup:
                 block.apply_device_map(device_str=device_str, dtype=dtype)
             else:
                 block.to(device=torch.device(device_str), dtype=dtype)
@@ -1565,10 +1585,10 @@ class EngramsModel(nn.Module):
         if engram_input_ids is None:
             engram_input_ids = input_ids
         
-        if self.config.get("offload_lookup"):
+        if self.config.offload_lookup:
             # If lookup offloaded to CPU, can be performed fully async, start now
 
-            for i in self.config.get("layer_ids"):
+            for i in self.config.layer_ids:
                 engram_block = self.transformer_blocks[i].engram
 
                 engram_block.cpu_future = self.executor.submit(
@@ -1617,8 +1637,8 @@ class EngramsModel(nn.Module):
         x = token_embeds + pos_embeds
         x = self.drop_emb(x)
 
-        if self.config["hc_mult"] > 1:
-            x = x.unsqueeze(2).expand(-1, -1, self.config["hc_mult"], -1).contiguous()
+        if self.config.hc_mult > 1:
+            x = x.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
         
         # Pass through all layers
         if self.execution_stages:
@@ -1703,7 +1723,7 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
 
     model.eval()
     model.reset_cache()
-    model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg", engram_cfg)
+    model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg")
 
     context_len = context_size or 256
     batch_size, base_len = input_ids.shape
