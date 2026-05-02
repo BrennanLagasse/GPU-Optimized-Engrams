@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from engrams_kv_moe_hybrid import EngramConfig, EngramsModel, engram_cfg, generate_text
 from engrams_naive import NaiveEngramsModel, generate_text_naive
 
+from tqdm import tqdm
+
 
 def build_config(args):
     return {
@@ -116,7 +118,7 @@ def main():
 
     print("Evaluating...")
     durations = []
-    for _ in range(args.trials):
+    for _ in tqdm(range(args.trials)):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         start = time.perf_counter()
