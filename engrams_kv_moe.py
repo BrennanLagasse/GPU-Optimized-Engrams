@@ -85,6 +85,8 @@ def normalize_device_map(
     layer_ids: Optional[List[int]] = None,
     hc_mult: int = 1,
 ):
+    """ Given the list of available GPUs, parse among available devices """
+
     if not device_map:
         return None
     devices = [str(device) for device in device_map]

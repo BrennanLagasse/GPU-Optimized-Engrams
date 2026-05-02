@@ -38,6 +38,9 @@ class EngramConfig:
     
 engram_cfg = EngramConfig()
 
+def config_parser():
+    """ Given a yaml of the config gnerate a config instance """
+    pass
 
 def estimate_block_weights(n_layers, layer_ids=None, hc_mult=1):
     engram_layers = set(layer_ids or [])
@@ -52,7 +55,6 @@ def estimate_block_weights(n_layers, layer_ids=None, hc_mult=1):
             weight += 0.10 * (hc_mult - 1)
         weights.append(weight)
     return weights
-
 
 def weighted_contiguous_partition(weights, num_buckets):
     if num_buckets <= 0:
@@ -80,7 +82,6 @@ def weighted_contiguous_partition(weights, num_buckets):
             assignments[idx] = max_allowed
     return assignments
 
-
 def normalize_device_map(
     device_map,
     n_layers,
@@ -98,7 +99,6 @@ def normalize_device_map(
     weights = estimate_block_weights(n_layers, layer_ids=layer_ids, hc_mult=hc_mult)
     buckets = weighted_contiguous_partition(weights, len(devices))
     return [devices[bucket] for bucket in buckets]
-
 
 def build_execution_stages(block_device_map, engram_layer_ids=None):
     if not block_device_map:
