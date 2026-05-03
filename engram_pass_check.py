@@ -61,9 +61,9 @@ def profile_engrams(engram_model: EngramsModel):
     mem_ratio = table_mem_gbs / total_mem_gbs * 100
 
     print(f"Model Params: {total_param_count / 10 ** 9}B")
-    print(f"Embedding Module Params: {emb_param_count / 10 ** 8}B")
+    print(f"Embedding Module Params: {emb_param_count / 10 ** 9}B")
     print(f"Lookup Table Params: {table_param_count / 10 ** 9}B ({param_ratio:.2f}% are allocated to the lookup table)")
-
+    print()
     print(f"Model Memory: {total_mem_gbs} GBs")
     print(f"Embedding Module Memory: {emb_mem_gbs} GBs")
     print(f"Lookup Table Memory: {table_mem_gbs} GBs ({mem_ratio:.2f}% is allocated to the lookup table)")
@@ -136,8 +136,8 @@ def main():
     print(f"Device: {device}")
 
     
-    print(f"Total time: {duration}")
-    print(f"Time per input: {avg_duration}")
+    print(f"Total time: {duration}s")
+    print(f"Time per input: {avg_duration}s")
 
     print("\n", "="*30, "Memory Profile", "="*30)
     profile_engrams(model)
