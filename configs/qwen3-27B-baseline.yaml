@@ -7,6 +7,8 @@ emb_dim: 5120
 hidden_dim: 17_408
 n_heads: 16
 n_layers: 64
+drop_rate: 0.0
+qkv_bias: False
 
 # Other
 num_experts: 0
@@ -17,6 +19,8 @@ hc_mult: 4
 layer_ids: [1, 14]
 
 engrams_cfg:
+  tokenizer_name_or_path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  engram_vocab_size: [258_560, 258_560]
   max_ngram_size: 3
   n_embed_per_ngram: 1280
   n_head_per_ngram: 8
