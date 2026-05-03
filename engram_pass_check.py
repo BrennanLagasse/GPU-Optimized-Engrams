@@ -1,3 +1,13 @@
+"""
+Check loading in the Engrams Model and get some basic stats.
+
+Performs:
+1. Loads model onto devices
+2. Determine how much time to precompute all embeddings for the Engram modules
+3. Outputs the memory profile and breaks into the lookup table, embedding module, and entire model
+
+"""
+
 import argparse
 import time
 import sys
@@ -41,7 +51,7 @@ def profile_engrams(engram_model: EngramsModel):
     for block in engram_model.transformer_blocks:
         if block.engram:
             table_params, table_mem = profile_module(block.engram.multi_head_embedding.embedding)
-            emb_params, emb_mem = profile_engrams(block.engram)
+            emb_params, emb_mem = profile_module(block.engram)
             table_param_count += table_params
             table_mem_gbs += table_mem
             emb_param_count += emb_params
@@ -113,7 +123,11 @@ def main():
 
     # Determine how long it takes to perform just the engram state pred
     start = time.perf_counter()
-    model._prepare_engram_hashes(input_ids, use_cache=True)
+
+    # model._prepare_engram_hashes(input_ids, use_cache=True)
+    for block in model.transformer_blocks:
+        if block.engram:
+            block.engram.precompute_embeddings
     duration = time.perf_counter() - start
 
     avg_duration = duration / args.batch_size
