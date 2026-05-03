@@ -4,7 +4,7 @@ device_map: "cuda:0"
 offload_lookup: False
 
 # Qwen3-27B
-vocab_size: 248_320
+vocab_size: 129_280 # From DeepSeek-R1 tokenizer
 context_length: 262_144
 emb_dim: 5120
 hidden_dim: 17_408
