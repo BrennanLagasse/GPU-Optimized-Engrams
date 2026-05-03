@@ -96,32 +96,35 @@ def main():
     # )
 
     parser.add_argument("--config", type=str, help="Path to config file")
-
-    # Whether to offload lookup table to GPU
     
 
     args = parser.parse_args()
 
     # Load in config from file
     config = config_parser(args.config)
+    if args.device_map:
+        config.device_map = args.device_map
+    config.device_map = [entry.strip() for entry in config.device_map.split(",") if entry.strip()]
+
+    print(f"Device map: {config.device_map}")
+
+    config.offload_lookup = args.offload_lookup
 
     torch.manual_seed(0)
-    device_map = [entry.strip() for entry in args.device_map.split(",") if entry.strip()]
-    args.device_map = device_map
-    device = torch.device(device_map[0] if device_map else args.device)
+    device = torch.device(config.device_map[0] if config.device_map else args.device)
     dtype = getattr(torch, args.dtype)
     # config = build_config(args)
     model_cls = EngramsModel if args.impl == "optimized" else NaiveEngramsModel
 
     print("Initializing model...")
     model = model_cls(config)
-    if device_map:
+    if config.device_map:
         model.apply_device_map(dtype=dtype)
     else:
         model = model.to(device=device, dtype=dtype)
     input_ids = torch.randint(
         0,
-        config["vocab_size"],
+        config.vocab_size,
         (args.batch_size, args.prompt_length),
         device=device,
         dtype=torch.long,
@@ -138,7 +141,7 @@ def main():
                 model,
                 input_ids,
                 max_new_tokens=args.max_new_tokens,
-                context_size=config["context_length"],
+                context_size=config.context_length,
                 use_cache=args.use_cache,
             )
         else:
@@ -146,7 +149,7 @@ def main():
                 model,
                 input_ids,
                 max_new_tokens=args.max_new_tokens,
-                context_size=config["context_length"],
+                context_size=config.context_length,
             )
         if device.type == "cuda":
             torch.cuda.synchronize(device)

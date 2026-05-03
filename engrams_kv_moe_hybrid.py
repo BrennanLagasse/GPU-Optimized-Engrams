@@ -45,12 +45,15 @@ class Config:
     hidden_dim: int
     n_heads: int
     n_layers: int
+    drop_rate: float
+    qkv_bias: bool
     num_experts: int
     num_experts_per_tok: int
     hc_mult: int
     layer_ids: List[int]
     engrams_cfg: EngramConfig
-    device_map: List[str]
+    device_map: str
+    offload_lookup: bool
 
 def config_parser(cfg_path):
     """ Given a yaml of the config gnerate a config instance """
@@ -777,9 +780,9 @@ class DenseFeedForward(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        self.fc1 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
-        self.fc2 = nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
-        self.fc3 = nn.Linear(cfg["hidden_dim"], cfg["emb_dim"], bias=False)
+        self.fc1 = nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
+        self.fc2 = nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
+        self.fc3 = nn.Linear(cfg.hidden_dim, cfg.emb_dim, bias=False)
 
     def forward(self, x):
         return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
@@ -871,7 +874,7 @@ class Engram(nn.Module):
             max_ngram_size=self.engram_cfg.max_ngram_size,
             n_embed_per_ngram=self.engram_cfg.n_embed_per_ngram,
             n_head_per_ngram=self.engram_cfg.n_head_per_ngram,
-            layer_ids=self.engram_cfg.layer_ids,
+            layer_ids=config.layer_ids,
             tokenizer_name_or_path=self.engram_cfg.tokenizer_name_or_path,
             pad_id=self.engram_cfg.pad_id,
             seed=self.engram_cfg.seed,
@@ -1274,31 +1277,31 @@ class MultiHeadAttention(nn.Module):
 class MoEFeedForward(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        self.num_experts_per_tok = cfg["num_experts_per_tok"]
-        self.num_experts = cfg["num_experts"]
-        self.emb_dim = cfg["emb_dim"]
+        self.num_experts_per_tok = cfg.num_experts_per_tok
+        self.num_experts = cfg.num_experts
+        self.emb_dim = cfg.emb_dim
 
         if self.num_experts <= 0:
             raise ValueError("MoEFeedForward requires num_experts > 0")
         if self.num_experts_per_tok <= 0:
             raise ValueError("MoEFeedForward requires num_experts_per_tok > 0")
 
-        self.gate = nn.Linear(cfg["emb_dim"], cfg["num_experts"], bias=False)
+        self.gate = nn.Linear(cfg.emb_dim, cfg.num_experts, bias=False)
         self.fc1 = nn.ModuleList(
             [
-                nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+                nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
                 for _ in range(self.num_experts)
             ]
         )
         self.fc2 = nn.ModuleList(
             [
-                nn.Linear(cfg["emb_dim"], cfg["hidden_dim"], bias=False)
+                nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
                 for _ in range(self.num_experts)
             ]
         )
         self.fc3 = nn.ModuleList(
             [
-                nn.Linear(cfg["hidden_dim"], cfg["emb_dim"], bias=False)
+                nn.Linear(cfg.hidden_dim, cfg.emb_dim, bias=False)
                 for _ in range(self.num_experts)
             ]
         )
@@ -1371,7 +1374,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.hc_mult = config.hc_mult
         self.attn = MultiHeadAttention(config)
-        if config["num_experts"] > 0:
+        if config.num_experts > 0:
             self.ff = MoEFeedForward(config)
         else:
             self.ff = DenseFeedForward(config)
@@ -1381,7 +1384,7 @@ class TransformerBlock(nn.Module):
         self.hc_attn = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
         self.hc_ff = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
         self.engram = None
-        if layer_id in config["layer_ids"]:
+        if layer_id in config.layer_ids:
             self.engram = Engram(config=config, layer_id=layer_id)
             self.hc_engram = ManifoldConstrainedHyperConnection(config.hc_mult, config.emb_dim)
         else:
@@ -1723,7 +1726,7 @@ def generate_text(model, input_ids, max_new_tokens, context_size=None, use_cache
 
     model.eval()
     model.reset_cache()
-    model_engrams_cfg = getattr(model, "config", {}).get("engrams_cfg")
+    model_engrams_cfg = model.config.engrams_cfg
 
     context_len = context_size or 256
     batch_size, base_len = input_ids.shape
