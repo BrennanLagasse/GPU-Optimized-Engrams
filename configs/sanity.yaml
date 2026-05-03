@@ -1,7 +1,7 @@
 # Small model for quick testing
 
 device_map: "cuda:0"
-offload_lookup: True
+offload_lookup: False
 
 vocab_size: 10_000
 context_length: 1024

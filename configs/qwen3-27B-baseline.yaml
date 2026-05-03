@@ -1,5 +1,8 @@
 # Parameters drawn from Engrams-27B and Qwen3-27B 
 
+device_map: "cuda:0"
+offload_lookup: False
+
 # Qwen3-27B
 vocab_size: 248_320
 context_length: 262_144
