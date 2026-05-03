@@ -17,39 +17,6 @@ from engrams_naive import NaiveEngramsModel, generate_text_naive
 
 from tqdm import tqdm
 
-
-def build_config(args):
-    return {
-        "vocab_size": args.vocab_size,
-        "context_length": args.context_length,
-        "emb_dim": args.emb_dim,
-        "hidden_dim": args.hidden_dim,
-        "n_heads": args.n_heads,
-        "n_layers": args.n_layers,
-        "drop_rate": 0.0,
-        "qkv_bias": False,
-        "num_experts": args.num_experts,
-        "num_experts_per_tok": args.num_experts_per_tok if args.num_experts > 0 else 0,
-        "hc_mult": args.hc_mult,
-        "layer_ids": args.layer_ids,
-        "device_map": args.device_map,
-        "engrams_cfg": EngramConfig(
-            tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
-            # engram_vocab_size=args.engram_vocab_size,
-            max_ngram_size=args.max_ngram_size,
-            n_embed_per_ngram=args.n_embed_per_ngram,
-            n_head_per_ngram=args.n_head_per_ngram,
-            layer_ids=args.layer_ids,
-            pad_id=engram_cfg.pad_id,
-            seed=engram_cfg.seed,
-            kernel_size=args.kernel_size,
-            use_short_conv=not args.disable_short_conv,
-            cached_inference_short_conv_mode=args.cached_inference_short_conv_mode,
-        ),
-        "offload_lookup": args.offload_lookup,
-    }
-
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -69,32 +36,6 @@ def main():
         help="True if lookup table is offloaded to CPU",
     )
 
-    # DeepSeek evaluates in the context of a 27B param model that is not public
-    # Defaults are inferred based on Qwen3.6-27B
-    # parser.add_argument("--vocab-size", type=int, default=129280)
-    # parser.add_argument("--context-length", type=int, default=262144) # Qwen-27B
-    # parser.add_argument("--emb-dim", type=int, default=256) # Qwen-27B
-    # parser.add_argument("--hidden-dim", type=int, default=1024)
-    # parser.add_argument("--n-heads", type=int, default=4)
-    # parser.add_argument("--n-layers", type=int, default=64) # Qwen3-27B
-    # parser.add_argument("--num-experts", type=int, default=0)
-    # parser.add_argument("--num-experts-per-tok", type=int, default=2)
-
-    # # Defaults follow Engram-32B model setup
-    # parser.add_argument("--hc-mult", type=int, default=4)
-    # parser.add_argument("--layer-ids", type=int, nargs="*", default=[1, 14])
-    # parser.add_argument("--max-ngram-size", type=int, default=3) 
-    # parser.add_argument("--n-embed-per-ngram", type=int, default=1280)
-    # parser.add_argument("--n-head-per-ngram", type=int, default=8) 
-
-    # parser.add_argument("--kernel-size", type=int, default=2)
-    # parser.add_argument("--disable-short-conv", action="store_true")
-    # parser.add_argument(
-    #     "--cached-inference-short-conv-mode",
-    #     choices=["full", "step_kernel", "gated_value_only"],
-    #     default="step_kernel",
-    # )
-
     parser.add_argument("--config", type=str, help="Path to config file")
     
 
@@ -113,7 +54,6 @@ def main():
     torch.manual_seed(0)
     device = torch.device(config.device_map[0] if config.device_map else args.device)
     dtype = getattr(torch, args.dtype)
-    # config = build_config(args)
     model_cls = EngramsModel if args.impl == "optimized" else NaiveEngramsModel
 
     print("Initializing model...")
