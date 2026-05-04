@@ -21,7 +21,7 @@ layer_ids: [1, 14]
 # Scale to ~1.6B params, same ratio as for Engrams-27B w/ 5B lookup
 engrams_cfg:
   tokenizer_name_or_path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-  engram_vocab_size: [86_186, 86_186]
+  engram_vocab_size: [689_488, 689_488]
   max_ngram_size: 3
   n_embed_per_ngram: 1280
   n_head_per_ngram: 8

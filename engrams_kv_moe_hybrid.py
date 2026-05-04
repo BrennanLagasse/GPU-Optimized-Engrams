@@ -5,6 +5,8 @@ Uses the Engrams Architecture with MHA and MoE
 
 Pre-norm residual units (to be replaced by mHC in later version)
 
+Optional offloading of Engrams lookup table to CPU, async computation of n-gram embeddings
+
 """
 
 from typing import List, Optional
