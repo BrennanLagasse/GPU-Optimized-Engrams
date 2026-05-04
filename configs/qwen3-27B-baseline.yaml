@@ -23,7 +23,7 @@ layer_ids: [1, 14]
 
 engrams_cfg:
   tokenizer_name_or_path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-  engram_vocab_size: [258_560, 258_560]
+  engram_vocab_size: [1_034_240, 1_034_240]
   max_ngram_size: 3
   n_embed_per_ngram: 1280
   n_head_per_ngram: 8
